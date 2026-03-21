@@ -3,20 +3,22 @@
 /**
  * machine-info.js
  * Collects Windows machine facts: hostname, serial, IP, MAC, logged-in user.
- * Uses PowerShell for data that os module cannot provide (serial, interactive user).
+ * All WMI calls are batched into a single PowerShell subprocess to minimise
+ * startup overhead (spawning PS repeatedly is slow).
  */
 
 const { execFileSync } = require('child_process');
 const os               = require('os');
 
 /**
- * Runs a short PowerShell expression and returns trimmed stdout.
- * Returns fallback string on any error.
+ * Runs a PowerShell expression, returning trimmed stdout or a fallback.
+ * Progress output is suppressed to avoid CLIXML noise.
  */
 function ps(expression, fallback = 'Unknown') {
   try {
+    const script = `$ProgressPreference = 'SilentlyContinue'; ${expression}`;
     const out = execFileSync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', expression
+      '-NoProfile', '-NonInteractive', '-Command', script
     ], { encoding: 'utf8', timeout: 8_000 });
     return out.trim() || fallback;
   } catch {
@@ -25,48 +27,73 @@ function ps(expression, fallback = 'Unknown') {
 }
 
 /**
- * Returns the currently logged-in interactive Windows user (just the username,
- * without the domain/hostname prefix). Uses Win32_ComputerSystem.UserName which
- * reflects the interactive session — correct even when the app runs as SYSTEM.
+ * Returns the currently logged-in interactive Windows user (username only,
+ * no domain/hostname prefix). Win32_ComputerSystem.UserName reflects the
+ * interactive session, correct even when the app runs as SYSTEM.
  */
 function getWindowsUser() {
   const raw = ps('(Get-WmiObject -Class Win32_ComputerSystem).UserName');
-  // UserName format: "DOMAIN\\username" or "HOSTNAME\\username"
   return raw.includes('\\') ? raw.split('\\').pop() : raw;
 }
 
 /**
- * Returns the BIOS serial number. May be "To Be Filled By O.E.M." on some
- * consumer boards — returned as-is.
- */
-function getSerial() {
-  return ps('(Get-WmiObject -Class Win32_BIOS).SerialNumber');
-}
-
-/**
- * Returns the first non-loopback IPv4 address and its MAC.
- */
-function getIPAndMAC() {
-  const ifaces = os.networkInterfaces();
-  for (const addrs of Object.values(ifaces)) {
-    for (const addr of addrs) {
-      if (addr.family === 'IPv4' && !addr.internal) {
-        return { ip: addr.address, mac: addr.mac };
-      }
-    }
-  }
-  return { ip: 'Unknown', mac: 'Unknown' };
-}
-
-/**
- * Returns all machine facts as a single object.
+ * Returns all machine facts in a single batched PowerShell call.
+ * Falls back to os module / 'Unknown' on any error.
  */
 function getMachineInfo() {
-  const hostname    = os.hostname();
-  const windowsUser = getWindowsUser();
-  const serial      = getSerial();
-  const { ip, mac } = getIPAndMAC();
+  const hostname = os.hostname();
+  const { ip, mac } = _getIPAndMAC();
+
+  // Batch serial + windows user into one PS call to keep startup fast
+  let windowsUser = 'Unknown';
+  let serial      = 'Unknown';
+  try {
+    const script = [
+      "$ProgressPreference = 'SilentlyContinue'",
+      "$u = (Get-WmiObject -Class Win32_ComputerSystem).UserName",
+      "$s = (Get-WmiObject -Class Win32_BIOS).SerialNumber",
+      "Write-Output $u",
+      "Write-Output $s"
+    ].join('; ');
+
+    const out   = execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', script
+    ], { encoding: 'utf8', timeout: 10_000 });
+
+    const lines = out.trim().split(/\r?\n/);
+    const rawUser = (lines[0] || '').trim();
+    windowsUser   = rawUser.includes('\\') ? rawUser.split('\\').pop() : (rawUser || 'Unknown');
+    serial        = (lines[1] || '').trim() || 'Unknown';
+  } catch {
+    // Non-fatal — fallback values used
+  }
+
   return { hostname, windowsUser, serial, ip, mac };
+}
+
+function _getIPAndMAC() {
+  const ifaces = os.networkInterfaces();
+  const candidates = [];
+
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    for (const addr of addrs) {
+      if (addr.family !== 'IPv4' || addr.internal) continue;
+      if (addr.mac === '00:00:00:00:00:00') continue; // skip VPN/virtual adapters
+      candidates.push({ name, ip: addr.address, mac: addr.mac });
+    }
+  }
+
+  if (!candidates.length) return { ip: 'Unknown', mac: 'Unknown' };
+
+  // Prefer adapters whose name suggests a physical NIC (Ethernet/Wi-Fi/Local Area)
+  // over VPN adapters (Tailscale, Hamachi, etc.)
+  const physical = candidates.find(c =>
+    /ethernet|wi-fi|wifi|wireless|local area/i.test(c.name) &&
+    !/tailscale|hamachi|vpn|tunnel/i.test(c.name)
+  );
+
+  const chosen = physical || candidates[0];
+  return { ip: chosen.ip, mac: chosen.mac };
 }
 
 module.exports = { getMachineInfo, getWindowsUser };

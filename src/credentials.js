@@ -31,6 +31,7 @@ function readSession() {
   // PowerShell script passed via -EncodedCommand to avoid shell quoting issues.
   // Reads the file as raw bytes and decrypts with LocalMachine scope.
   const psScript = [
+    '$ProgressPreference = "SilentlyContinue"',   // suppress CLIXML progress noise
     'Add-Type -AssemblyName System.Security',
     `$bytes  = [System.IO.File]::ReadAllBytes('${SESSION_PATH}')`,
     '$scope  = [System.Security.Cryptography.DataProtectionScope]::LocalMachine',
