@@ -2,12 +2,13 @@
   "name": "bracer-chat",
   "version": "1.0.0",
   "description": "Bracer Systems client support chat",
+  "author": "Bracer Systems Inc.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "icons": "node scripts/generate-icons.js",
-    "build": "npm run icons && electron-builder --win",
-    "build:dir": "npm run icons && electron-builder --win --dir"
+    "build": "npm run icons && node scripts/prep-wincosesign.js && electron-builder --win",
+    "build:dir": "npm run icons && node scripts/prep-wincosesign.js && electron-builder --win --dir"
   },
   "devDependencies": {
     "electron": "^28.3.3",
