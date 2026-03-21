@@ -1,0 +1,76 @@
+'use strict';
+
+/**
+ * window.js
+ * Creates and manages the single chat BrowserWindow.
+ * - skipTaskbar: true  → no Windows taskbar entry
+ * - alwaysOnTop is set temporarily when showing due to a new message,
+ *   then released after 3 s so the user can move it behind other windows.
+ */
+
+const { BrowserWindow } = require('electron');
+const path              = require('path');
+
+let win = null;
+
+/**
+ * Creates the hidden chat window.
+ * @param {string} preloadPath  Absolute path to preload.js
+ * @param {string} htmlPath     Absolute path to renderer/index.html
+ * @returns {BrowserWindow}
+ */
+function createWindow(preloadPath, htmlPath) {
+  win = new BrowserWindow({
+    width       : 420,
+    height      : 620,
+    show        : false,
+    frame       : true,
+    resizable   : true,
+    skipTaskbar : true,   // No Windows taskbar entry
+    title       : 'Bracer Chat',
+    webPreferences: {
+      preload          : preloadPath,
+      contextIsolation : true,
+      nodeIntegration  : false,
+      sandbox          : false   // Required so preload can use require/ipcRenderer
+    }
+  });
+
+  win.loadFile(htmlPath);
+
+  // Suppress the default menu bar (File, Edit, View…)
+  win.setMenuBarVisibility(false);
+
+  return win;
+}
+
+/**
+ * Shows the chat window.
+ * @param {boolean} alwaysOnTop  If true, window pops above everything for 3 s.
+ */
+function showWindow(alwaysOnTop = false) {
+  if (!win || win.isDestroyed()) return;
+  win.setAlwaysOnTop(alwaysOnTop);
+  win.show();
+  win.focus();
+  if (alwaysOnTop) {
+    setTimeout(() => {
+      if (win && !win.isDestroyed()) win.setAlwaysOnTop(false);
+    }, 3_000);
+  }
+}
+
+function hideWindow() {
+  if (win && !win.isDestroyed()) win.hide();
+}
+
+/**
+ * Send a message to the renderer via ipcRenderer.on / webContents.send.
+ */
+function sendToRenderer(channel, ...args) {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send(channel, ...args);
+  }
+}
+
+module.exports = { createWindow, showWindow, hideWindow, sendToRenderer };
