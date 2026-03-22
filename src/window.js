@@ -46,17 +46,26 @@ function createWindow(preloadPath, htmlPath) {
 
 /**
  * Shows the chat window.
- * @param {boolean} alwaysOnTop  If true, window pops above everything for 3 s.
+ * @param {boolean} alwaysOnTop  If true, window pops above everything for 5 s.
  */
 function showWindow(alwaysOnTop = false) {
   if (!win || win.isDestroyed()) return;
-  win.setAlwaysOnTop(alwaysOnTop);
+
+  if (alwaysOnTop) {
+    // 'screen-saver' level floats above all normal and system windows on Windows
+    win.setAlwaysOnTop(true, 'screen-saver');
+  } else {
+    win.setAlwaysOnTop(false);
+  }
+
   win.show();
+  win.moveTop();   // force to Z-order top even if another app holds focus
   win.focus();
+
   if (alwaysOnTop) {
     setTimeout(() => {
       if (win && !win.isDestroyed()) win.setAlwaysOnTop(false);
-    }, 3_000);
+    }, 5_000);
   }
 }
 

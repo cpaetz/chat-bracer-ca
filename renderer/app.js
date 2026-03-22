@@ -137,6 +137,26 @@ async function init() {
     // Start listening for new messages delivered by the sync loop
     window.bracerChat.onNewMessage(handleIncomingMessage);
 
+    // When window is shown due to an incoming message: expand pinned panel
+    // and scroll to the triggering message
+    window.bracerChat.onFocusMessage(({ eventId }) => {
+      // Expand pinned panel if there are any pins
+      const pins = loadPinned();
+      if (pins.length > 0) {
+        elPinnedPanel.classList.remove('collapsed');
+      }
+      // Scroll to the new message bubble (may not be rendered yet — retry briefly)
+      const scrollToEvent = (id, attempts = 0) => {
+        const bubble = document.querySelector(`[data-event-id="${id}"]`);
+        if (bubble) {
+          bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        } else if (attempts < 10) {
+          setTimeout(() => scrollToEvent(id, attempts + 1), 150);
+        }
+      };
+      scrollToEvent(eventId);
+    });
+
   } catch (err) {
     elConnStatus.textContent = 'Error';
     showStatus('Failed to load: ' + err.message);

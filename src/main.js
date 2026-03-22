@@ -136,7 +136,9 @@ app.on('ready', async () => {
 
     // Only trigger the popup for the machine's own support room
     if (roomId === session.room_id_machine) {
-      showWindow(true); // alwaysOnTop for 3 s
+      showWindow(true); // alwaysOnTop for 5 s
+      // Tell renderer to expand pinned panel and scroll to this message
+      sendToRenderer('focus-message', { eventId: event.event_id });
     }
   });
 

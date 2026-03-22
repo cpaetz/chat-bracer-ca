@@ -59,5 +59,13 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Remove all new-message listeners (call before re-registering). */
   offNewMessage: () => {
     ipcRenderer.removeAllListeners('new-message');
+  },
+
+  /**
+   * Called when the window is shown because a new message arrived.
+   * Renderer should expand pinned panel and scroll to the message.
+   */
+  onFocusMessage: (callback) => {
+    ipcRenderer.on('focus-message', (_event, data) => callback(data));
   }
 });
