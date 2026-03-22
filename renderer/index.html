@@ -17,14 +17,28 @@
 
   <div id="status-bar"></div>
 
+  <!-- Pinned messages panel (hidden when empty) -->
+  <div id="pinned-panel" class="empty">
+    <div id="pinned-header">
+      <span>📌 Pinned (<span id="pinned-count">0</span>)</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div id="pinned-list"></div>
+  </div>
+
   <div id="messages" role="log" aria-live="polite" aria-label="Messages"></div>
 
   <div class="drag-overlay" aria-hidden="true">Drop file to send</div>
 
+  <!-- Right-click context menu -->
+  <div id="ctx-menu" role="menu">
+    <div class="ctx-item" id="ctx-pin" role="menuitem">📌 Pin message</div>
+  </div>
+
   <div id="compose">
     <button class="compose-btn" id="btn-attach"     title="Attach file"     aria-label="Attach file">Attach</button>
     <button class="compose-btn" id="btn-screenshot" title="Send screenshot" aria-label="Send screenshot">Screenshot</button>
-    <input  type="file" id="file-input" style="display:none" aria-hidden="true">
+    <button id="btn-ticket" title="Open a support ticket" aria-label="Open Ticket">Open Ticket</button>
     <textarea id="msg-input" placeholder="Type a message…" rows="1" aria-label="Message input"></textarea>
     <button id="btn-send" aria-label="Send message">Send</button>
   </div>

@@ -31,6 +31,12 @@ contextBridge.exposeInMainWorld('bracerChat', {
   sendFile: (roomId, fileData, fileName, mimeType) =>
     ipcRenderer.invoke('send-file', roomId, fileData, fileName, mimeType),
 
+  /**
+   * Opens a native file picker dialog and returns the file data.
+   * @returns {Promise<{data: ArrayBuffer, name: string, mimeType: string}|null>} null if cancelled
+   */
+  openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
+
   /** Captures the primary screen and sends as m.image. @returns {Promise<void>} */
   sendScreenshot: (roomId) => ipcRenderer.invoke('send-screenshot', roomId),
 

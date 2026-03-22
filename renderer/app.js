@@ -6,9 +6,14 @@
  * No Node.js or Electron APIs used directly.
  */
 
+// ── Constants ──────────────────────────────────────────────────────────────
+const THIRTY_DAYS_MS  = 30 * 24 * 60 * 60 * 1000;
+const PINNED_STORAGE_KEY = 'bracerChat_pinnedMessages';
+
 // ── State ──────────────────────────────────────────────────────────────────
 let sessionInfo  = null;
 let activeRoomId = null;
+let ctxTargetEventId = null; // event_id of the message the context menu opened on
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const elRoomName    = document.getElementById('room-name');
@@ -18,9 +23,102 @@ const elMsgInput    = document.getElementById('msg-input');
 const elBtnSend     = document.getElementById('btn-send');
 const elBtnAttach   = document.getElementById('btn-attach');
 const elBtnShot     = document.getElementById('btn-screenshot');
-const elFileInput   = document.getElementById('file-input');
+const elBtnTicket   = document.getElementById('btn-ticket');
 const elStatusBar   = document.getElementById('status-bar');
 const elDragOverlay = document.querySelector('.drag-overlay');
+const elPinnedPanel = document.getElementById('pinned-panel');
+const elPinnedHeader= document.getElementById('pinned-header');
+const elPinnedList  = document.getElementById('pinned-list');
+const elPinnedCount = document.getElementById('pinned-count');
+const elCtxMenu     = document.getElementById('ctx-menu');
+const elCtxPin      = document.getElementById('ctx-pin');
+
+// ── Pinned messages (localStorage) ─────────────────────────────────────────
+
+function loadPinned() {
+  try {
+    return JSON.parse(localStorage.getItem(PINNED_STORAGE_KEY) || '[]');
+  } catch { return []; }
+}
+
+function savePinned(pins) {
+  localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(pins));
+}
+
+function isPinned(eventId) {
+  return loadPinned().some(p => p.event_id === eventId);
+}
+
+function pinMessage(event) {
+  const pins = loadPinned();
+  if (pins.some(p => p.event_id === event.event_id)) return; // already pinned
+  pins.push({
+    event_id: event.event_id,
+    sender  : event.sender,
+    body    : event.content && event.content.body ? event.content.body : '[attachment]',
+    ts      : event.origin_server_ts,
+    pinnedAt: Date.now()
+  });
+  savePinned(pins);
+  renderPinnedPanel();
+  // Highlight the message bubble
+  const bubble = document.querySelector(`[data-event-id="${event.event_id}"]`);
+  if (bubble) bubble.classList.add('pinned-highlight');
+}
+
+function unpinMessage(eventId) {
+  const pins = loadPinned().filter(p => p.event_id !== eventId);
+  savePinned(pins);
+  renderPinnedPanel();
+  const bubble = document.querySelector(`[data-event-id="${eventId}"]`);
+  if (bubble) bubble.classList.remove('pinned-highlight');
+}
+
+function renderPinnedPanel() {
+  const pins = loadPinned();
+  elPinnedCount.textContent = pins.length;
+
+  if (pins.length === 0) {
+    elPinnedPanel.classList.add('empty');
+    return;
+  }
+  elPinnedPanel.classList.remove('empty');
+
+  elPinnedList.innerHTML = '';
+  for (const pin of pins) {
+    const item = document.createElement('div');
+    item.className = 'pinned-item';
+
+    const sender = document.createElement('span');
+    sender.className   = 'pin-sender';
+    sender.textContent = senderLabel(pin.sender);
+
+    const body = document.createElement('span');
+    body.className   = 'pin-body';
+    body.textContent = pin.body.length > 80 ? pin.body.slice(0, 80) + '…' : pin.body;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className   = 'pin-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title       = 'Unpin';
+    removeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      unpinMessage(pin.event_id);
+    });
+
+    item.appendChild(sender);
+    item.appendChild(body);
+    item.appendChild(removeBtn);
+
+    // Click item → scroll to that message bubble
+    item.addEventListener('click', () => {
+      const bubble = document.querySelector(`[data-event-id="${pin.event_id}"]`);
+      if (bubble) bubble.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+
+    elPinnedList.appendChild(item);
+  }
+}
 
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
@@ -31,6 +129,7 @@ async function init() {
     elRoomName.textContent   = `Support — ${sessionInfo.hostname}`;
     elConnStatus.textContent = 'Loading history…';
 
+    renderPinnedPanel();
     await loadHistory();
 
     elConnStatus.textContent = 'Connected';
@@ -60,7 +159,6 @@ function senderLabel(userId) {
 
 /**
  * Builds and appends (or prepends) a message bubble.
- * Async because image/file body elements may need to resolve mxc:// URLs.
  */
 async function renderMessage(event, prepend = false) {
   if (!event || !event.content) return;
@@ -71,6 +169,11 @@ async function renderMessage(event, prepend = false) {
   const wrap = document.createElement('div');
   wrap.className       = `message ${isOwn ? 'own' : 'other'}`;
   wrap.dataset.eventId = event.event_id || '';
+
+  // Highlight if pinned
+  if (event.event_id && isPinned(event.event_id)) {
+    wrap.classList.add('pinned-highlight');
+  }
 
   // Sender label (hidden for own messages via CSS)
   const senderEl = document.createElement('div');
@@ -95,7 +198,6 @@ async function renderMessage(event, prepend = false) {
         const httpUrl = await window.bracerChat.resolveMediaUrl(content.url);
         if (httpUrl) {
           img.src = httpUrl;
-          // Click to open full-size in browser
           img.addEventListener('click', () => window.bracerChat.openExternal(httpUrl));
         }
         bodyEl.appendChild(img);
@@ -135,6 +237,9 @@ async function renderMessage(event, prepend = false) {
   timeEl.textContent = formatTime(event.origin_server_ts);
   wrap.appendChild(timeEl);
 
+  // Store event data on the element for context menu
+  wrap._matrixEvent = event;
+
   if (prepend) {
     elMessages.insertBefore(wrap, elMessages.firstChild);
   } else {
@@ -144,9 +249,14 @@ async function renderMessage(event, prepend = false) {
 
 async function loadHistory() {
   elMessages.innerHTML = '';
-  const events = await window.bracerChat.getRoomHistory(activeRoomId);
+  const events      = await window.bracerChat.getRoomHistory(activeRoomId);
+  const cutoff      = Date.now() - THIRTY_DAYS_MS;
+  const pinnedIds   = new Set(loadPinned().map(p => p.event_id));
+
   for (const event of events) {
-    if (event.type === 'm.room.message') {
+    if (event.type !== 'm.room.message') continue;
+    // Show if within 30 days OR pinned
+    if (event.origin_server_ts >= cutoff || pinnedIds.has(event.event_id)) {
       await renderMessage(event);
     }
   }
@@ -160,12 +270,8 @@ function scrollToBottom() {
 // ── Incoming messages (from sync loop) ────────────────────────────────────
 
 async function handleIncomingMessage({ roomId, event }) {
-  // Only render messages for the currently viewed room
   if (roomId !== activeRoomId) return;
-
-  // Deduplicate (sync may occasionally deliver an event twice)
   if (event.event_id && document.querySelector(`[data-event-id="${event.event_id}"]`)) return;
-
   await renderMessage(event);
   scrollToBottom();
 }
@@ -184,34 +290,40 @@ async function sendMessage() {
     await window.bracerChat.sendMessage(activeRoomId, text);
   } catch (err) {
     showStatus('Send failed: ' + err.message);
-    elMsgInput.value = text; // Restore on failure
+    elMsgInput.value = text;
   } finally {
     elBtnSend.disabled = false;
     elMsgInput.focus();
   }
 }
 
-// ── Send file ──────────────────────────────────────────────────────────────
+// ── Attach file (native dialog) ────────────────────────────────────────────
 
-async function sendFile(file) {
-  const MAX = 100 * 1024 * 1024; // 100 MB
-  if (file.size > MAX) {
-    showStatus(`File too large: ${(file.size / 1024 / 1024).toFixed(1)} MB (max 100 MB)`);
+async function attachFile() {
+  elBtnAttach.disabled = true;
+  try {
+    const result = await window.bracerChat.openFileDialog();
+    if (!result) return; // user cancelled
+    await sendFileByPath(result);
+  } catch (err) {
+    showStatus('Attach failed: ' + err.message);
+  } finally {
+    elBtnAttach.disabled = false;
+  }
+}
+
+async function sendFileByPath({ path, name, mimeType, data }) {
+  const MAX = 100 * 1024 * 1024;
+  if (data.byteLength > MAX) {
+    showStatus(`File too large: ${(data.byteLength / 1024 / 1024).toFixed(1)} MB (max 100 MB)`);
     return;
   }
-
-  showStatus(`Uploading ${file.name}…`);
-  elBtnAttach.disabled = true;
-
+  showStatus(`Uploading ${name}…`);
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const mimeType    = file.type || 'application/octet-stream';
-    await window.bracerChat.sendFile(activeRoomId, arrayBuffer, file.name, mimeType);
+    await window.bracerChat.sendFile(activeRoomId, data, name, mimeType);
     hideStatus();
   } catch (err) {
     showStatus('Upload failed: ' + err.message);
-  } finally {
-    elBtnAttach.disabled = false;
   }
 }
 
@@ -225,9 +337,24 @@ async function sendScreenshot() {
     await window.bracerChat.sendScreenshot(activeRoomId);
     hideStatus();
   } catch (err) {
-    showStatus('Screenshot failed: ' + err.message);
+    showStatus('Screenshot failed: ' + err.message, 0); // persistent
+    console.error('[app] Screenshot error:', err);
   } finally {
     elBtnShot.disabled = false;
+  }
+}
+
+// ── Open Ticket ────────────────────────────────────────────────────────────
+
+async function openTicket() {
+  elBtnTicket.disabled = true;
+  try {
+    await window.bracerChat.sendMessage(activeRoomId, '!ticket');
+  } catch (err) {
+    showStatus('Failed to open ticket: ' + err.message);
+  } finally {
+    elBtnTicket.disabled = false;
+    elMsgInput.focus();
   }
 }
 
@@ -235,7 +362,7 @@ async function sendScreenshot() {
 
 let statusTimer = null;
 
-function showStatus(msg, autoDismissMs = 0) {
+function showStatus(msg, autoDismissMs = 5000) {
   elStatusBar.textContent = msg;
   elStatusBar.classList.add('visible');
   if (statusTimer) clearTimeout(statusTimer);
@@ -253,6 +380,55 @@ function autoResizeTextarea() {
   elMsgInput.style.height = Math.min(elMsgInput.scrollHeight, 120) + 'px';
 }
 
+// ── Context menu ───────────────────────────────────────────────────────────
+
+function hideCtxMenu() {
+  elCtxMenu.classList.remove('visible');
+  ctxTargetEventId = null;
+}
+
+elMessages.addEventListener('contextmenu', (e) => {
+  const bubble = e.target.closest('.message');
+  if (!bubble || !bubble._matrixEvent) return;
+
+  e.preventDefault();
+  ctxTargetEventId = bubble._matrixEvent.event_id;
+
+  const pinned = isPinned(ctxTargetEventId);
+  elCtxPin.textContent = pinned ? '📌 Unpin message' : '📌 Pin message';
+
+  // Position near cursor, keep within viewport
+  const menuW = 160, menuH = 40;
+  let x = e.clientX, y = e.clientY;
+  if (x + menuW > window.innerWidth)  x = window.innerWidth  - menuW - 4;
+  if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 4;
+
+  elCtxMenu.style.left = x + 'px';
+  elCtxMenu.style.top  = y + 'px';
+  elCtxMenu.classList.add('visible');
+});
+
+elCtxPin.addEventListener('click', () => {
+  if (!ctxTargetEventId) return;
+  if (isPinned(ctxTargetEventId)) {
+    unpinMessage(ctxTargetEventId);
+  } else {
+    // Find the event from a rendered bubble
+    const bubble = document.querySelector(`[data-event-id="${ctxTargetEventId}"]`);
+    if (bubble && bubble._matrixEvent) pinMessage(bubble._matrixEvent);
+  }
+  hideCtxMenu();
+});
+
+document.addEventListener('click',    hideCtxMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideCtxMenu(); });
+
+// ── Pinned panel collapse/expand ───────────────────────────────────────────
+
+elPinnedHeader.addEventListener('click', () => {
+  elPinnedPanel.classList.toggle('collapsed');
+});
+
 // ── Event listeners ────────────────────────────────────────────────────────
 
 elBtnSend.addEventListener('click', sendMessage);
@@ -266,17 +442,11 @@ elMsgInput.addEventListener('keydown', (e) => {
 
 elMsgInput.addEventListener('input', autoResizeTextarea);
 
-elBtnAttach.addEventListener('click', () => elFileInput.click());
-
-elFileInput.addEventListener('change', () => {
-  const file = elFileInput.files[0];
-  if (file) {
-    sendFile(file);
-    elFileInput.value = ''; // Reset so same file can be re-sent
-  }
-});
+elBtnAttach.addEventListener('click', attachFile);
 
 elBtnShot.addEventListener('click', sendScreenshot);
+
+elBtnTicket.addEventListener('click', openTicket);
 
 // ── Drag-and-drop ──────────────────────────────────────────────────────────
 
@@ -298,7 +468,17 @@ document.addEventListener('drop', (e) => {
   dragDepth = 0;
   elDragOverlay.classList.remove('active');
   const file = e.dataTransfer && e.dataTransfer.files[0];
-  if (file) sendFile(file);
+  if (!file) return;
+  // Read dropped file as ArrayBuffer and upload
+  const reader = new FileReader();
+  reader.onload = async () => {
+    await sendFileByPath({
+      data    : reader.result,
+      name    : file.name,
+      mimeType: file.type || 'application/octet-stream'
+    });
+  };
+  reader.readAsArrayBuffer(file);
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────

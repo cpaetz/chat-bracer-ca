@@ -17,6 +17,7 @@
 const {
   app,
   ipcMain,
+  dialog,
   desktopCapturer,
   shell,
   session: electronSession
@@ -84,6 +85,11 @@ app.on('ready', async () => {
       winInstance.hide();
     }
   });
+
+  // In dev mode, show the window immediately for testing
+  if (!app.isPackaged) {
+    showWindow(false);
+  }
 
   createTray(
     path.join(__dirname, '..', 'assets', 'tray.png'),
@@ -193,6 +199,30 @@ ipcMain.handle('get-room-history', async (_event, roomId) => {
 
 ipcMain.handle('send-message', async (_event, roomId, text) => {
   await matrixClient.sendMessage(roomId, text);
+});
+
+ipcMain.handle('open-file-dialog', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters    : [
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+
+  const filePath = result.filePaths[0];
+  const buf      = fs.readFileSync(filePath);
+  const name     = path.basename(filePath);
+  // Basic mime type detection by extension
+  const ext      = path.extname(filePath).toLowerCase().slice(1);
+  const mimeMap  = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', pdf: 'application/pdf', txt: 'text/plain',
+    zip: 'application/zip', mp4: 'video/mp4', mp3: 'audio/mpeg'
+  };
+  const mimeType = mimeMap[ext] || 'application/octet-stream';
+
+  return { data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), name, mimeType };
 });
 
 ipcMain.handle('send-file', async (_event, roomId, fileData, fileName, mimeType) => {

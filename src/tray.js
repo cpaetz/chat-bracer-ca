@@ -43,10 +43,9 @@ function createTray(iconPath, onShow, onQuit) {
 
 function _rebuildMenu() {
   if (!tray) return;
+  // No Quit option — end users cannot stop the Bracer Chat agent
   const menu = Menu.buildFromTemplate([
-    { label: 'Open Bracer Chat', click: () => _onShow && _onShow() },
-    { type: 'separator' },
-    { label: 'Quit',             click: () => _onQuit && _onQuit() }
+    { label: 'Open Bracer Chat', click: () => _onShow && _onShow() }
   ]);
   tray.setContextMenu(menu);
 }
