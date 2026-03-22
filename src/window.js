@@ -20,6 +20,7 @@ let win = null;
  * @returns {BrowserWindow}
  */
 function createWindow(preloadPath, htmlPath) {
+  const iconPath = path.join(__dirname, '..', 'assets', 'icon.ico');
   win = new BrowserWindow({
     width       : 420,
     height      : 620,
@@ -28,6 +29,7 @@ function createWindow(preloadPath, htmlPath) {
     resizable   : true,
     skipTaskbar : true,   // No Windows taskbar entry
     title       : 'Bracer Chat',
+    icon        : iconPath,
     webPreferences: {
       preload          : preloadPath,
       contextIsolation : true,

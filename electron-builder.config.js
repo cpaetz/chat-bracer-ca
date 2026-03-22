@@ -8,7 +8,7 @@ module.exports = {
   files: ['src/**/*', 'renderer/**/*', 'assets/**/*'],
   win: {
     target: [{ target: 'nsis', arch: ['x64'] }],
-    icon: 'assets/icon.png'
+    icon: 'assets/icon.ico'
   },
   nsis: {
     oneClick: true,

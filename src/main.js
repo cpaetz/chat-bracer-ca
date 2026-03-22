@@ -91,7 +91,7 @@ app.on('ready', async () => {
   }
 
   createTray(
-    path.join(__dirname, '..', 'assets', 'tray.png'),
+    path.join(__dirname, '..', 'assets', 'icon.ico'),
     () => showWindow(false),
     () => {
       isAppQuitting = true;
