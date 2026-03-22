@@ -143,13 +143,29 @@ body {
 
 /* ── Compose area ───────────────────────────────────────────────────────── */
 #compose {
-  display    : flex;
-  align-items: flex-end;
-  gap        : 6px;
-  padding    : 10px 12px;
-  border-top : 1px solid var(--color-border);
-  background : var(--color-bg);
-  flex-shrink: 0;
+  display       : flex;
+  flex-direction: column;
+  gap           : 6px;
+  padding       : 8px 12px 10px;
+  border-top    : 1px solid var(--color-border);
+  background    : var(--color-bg);
+  flex-shrink   : 0;
+}
+
+#compose-input-row {
+  display: flex;
+}
+
+#compose-action-row {
+  display        : flex;
+  align-items    : center;
+  justify-content: space-between;
+  gap            : 6px;
+}
+
+#compose-action-left {
+  display: flex;
+  gap    : 6px;
 }
 
 .compose-btn {
@@ -177,17 +193,18 @@ body {
 }
 
 #msg-input {
-  flex       : 1;
-  border     : 1px solid var(--color-border);
+  flex         : 1;
+  width        : 100%;
+  border       : 1px solid var(--color-border);
   border-radius: 5px;
-  padding    : 7px 10px;
-  font-family: inherit;
-  font-size  : 14px;
-  resize     : none;
-  min-height : 36px;
-  max-height : 120px;
-  line-height: 1.4;
-  outline    : none;
+  padding      : 7px 10px;
+  font-family  : inherit;
+  font-size    : 14px;
+  resize       : none;
+  min-height   : 36px;
+  max-height   : 120px;
+  line-height  : 1.4;
+  outline      : none;
 }
 
 #msg-input:focus {

@@ -36,11 +36,17 @@
   </div>
 
   <div id="compose">
-    <button class="compose-btn" id="btn-attach"     title="Attach file"     aria-label="Attach file">Attach</button>
-    <button class="compose-btn" id="btn-screenshot" title="Send screenshot" aria-label="Send screenshot">Screenshot</button>
-    <button id="btn-ticket" title="Open a support ticket" aria-label="Open Ticket">Open Ticket</button>
-    <textarea id="msg-input" placeholder="Type a message…" rows="1" aria-label="Message input"></textarea>
-    <button id="btn-send" aria-label="Send message">Send</button>
+    <div id="compose-input-row">
+      <textarea id="msg-input" placeholder="Type a message…" rows="1" aria-label="Message input"></textarea>
+    </div>
+    <div id="compose-action-row">
+      <div id="compose-action-left">
+        <button class="compose-btn" id="btn-attach"     title="Attach file"     aria-label="Attach file">Attach</button>
+        <button class="compose-btn" id="btn-screenshot" title="Send screenshot" aria-label="Send screenshot">Screenshot</button>
+        <button id="btn-ticket" title="Open a support ticket" aria-label="Open Ticket">Open Ticket</button>
+      </div>
+      <button id="btn-send" aria-label="Send message">Send</button>
+    </div>
   </div>
 
   <script src="app.js"></script>
