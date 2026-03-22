@@ -276,13 +276,18 @@ class MatrixClient {
 
         this.syncToken = data.next_batch;
 
-        // Emit message events only after initial sync (avoid popups for old messages).
+        // Emit events only after initial sync (avoid popups for old messages).
         // Own messages are excluded — they are rendered optimistically on send.
+        // m.room.encrypted is included as a trigger so encrypted rooms still
+        // cause the popup even though we can't decrypt the content.
         if (this._initialSyncDone && data.rooms && data.rooms.join) {
           for (const [roomId, roomData] of Object.entries(data.rooms.join)) {
             const events = roomData.timeline && roomData.timeline.events || [];
             for (const event of events) {
-              if (event.type === 'm.room.message' && event.sender !== this.userId) {
+              const isMessage   = event.type === 'm.room.message';
+              const isEncrypted = event.type === 'm.room.encrypted';
+              const fromOther   = event.sender !== this.userId;
+              if ((isMessage || isEncrypted) && fromOther) {
                 for (const handler of this._messageHandlers) {
                   handler({ roomId, event });
                 }

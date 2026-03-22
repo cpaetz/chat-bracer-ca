@@ -19,8 +19,7 @@ const {
   ipcMain,
   dialog,
   desktopCapturer,
-  shell,
-  session: electronSession
+  shell
 } = require('electron');
 
 const path = require('path');
@@ -100,18 +99,6 @@ app.on('ready', async () => {
       clearInterval(userPollInterval);
       destroyTray();
       app.quit();
-    }
-  );
-
-  // 4a. Inject auth header for authenticated media downloads ─────────────
-  // Synapse 1.99+ requires auth on /_matrix/client/v1/media/download
-  electronSession.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: [`${HOMESERVER_URL}/_matrix/client/v1/media/*`] },
-    (details, callback) => {
-      if (session && session.access_token) {
-        details.requestHeaders['Authorization'] = `Bearer ${session.access_token}`;
-      }
-      callback({ requestHeaders: details.requestHeaders });
     }
   );
 
@@ -262,8 +249,17 @@ ipcMain.handle('send-screenshot', async (_event, roomId) => {
   return { mxcUri, fileName };
 });
 
-ipcMain.handle('resolve-media-url', (_event, mxcUri) => {
-  return matrixClient.resolveMediaUrl(mxcUri);
+ipcMain.handle('resolve-media-url', async (_event, mxcUri) => {
+  // Fetch with auth in the main process and return a data: URI.
+  // This avoids network interception (which destabilises Electron's network service)
+  // and works regardless of whether the server requires auth for media.
+  try {
+    const { buffer, mimeType } = await matrixClient.fetchMedia(mxcUri);
+    return `data:${mimeType};base64,${buffer.toString('base64')}`;
+  } catch (err) {
+    console.error('[BracerChat] resolve-media-url failed:', err.message);
+    return null;
+  }
 });
 
 // Only allow opening https:// URLs to prevent protocol-handler abuse

@@ -51,21 +51,19 @@ function createWindow(preloadPath, htmlPath) {
 function showWindow(alwaysOnTop = false) {
   if (!win || win.isDestroyed()) return;
 
-  if (alwaysOnTop) {
-    // 'screen-saver' level floats above all normal and system windows on Windows
-    win.setAlwaysOnTop(true, 'screen-saver');
-  } else {
-    win.setAlwaysOnTop(false);
-  }
-
+  // Show and restore the window first, then apply alwaysOnTop
   win.show();
-  win.moveTop();   // force to Z-order top even if another app holds focus
+  win.restore(); // un-minimize if minimized
   win.focus();
 
   if (alwaysOnTop) {
+    win.setAlwaysOnTop(true);
+    win.moveTop();
     setTimeout(() => {
       if (win && !win.isDestroyed()) win.setAlwaysOnTop(false);
     }, 5_000);
+  } else {
+    win.setAlwaysOnTop(false);
   }
 }
 
