@@ -271,11 +271,19 @@ ipcMain.handle('open-external', (_event, url) => {
   }
 });
 
-// Download a file (with auth) to a temp directory and open it with the OS
+// Download a file (with auth) — shows a native Save As dialog
 ipcMain.handle('download-file', async (_event, mxcUri, fileName) => {
-  const { buffer, mimeType } = await matrixClient.fetchMedia(mxcUri);
-  const safeName  = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
-  const tmpPath   = path.join(os.tmpdir(), `bracer-${Date.now()}-${safeName}`);
-  fs.writeFileSync(tmpPath, buffer);
-  await shell.openPath(tmpPath);
+  const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+
+  const { filePath, canceled } = await dialog.showSaveDialog({
+    title      : 'Save file',
+    defaultPath: path.join(os.homedir(), 'Downloads', safeName),
+    buttonLabel: 'Save'
+  });
+
+  if (canceled || !filePath) return;
+
+  const { buffer } = await matrixClient.fetchMedia(mxcUri);
+  fs.writeFileSync(filePath, buffer);
+  await shell.showItemInFolder(filePath); // reveal in Explorer after save
 });
