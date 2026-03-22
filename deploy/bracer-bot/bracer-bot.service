@@ -1,0 +1,20 @@
+[Unit]
+Description=Bracer Support Bot
+After=network.target matrix-synapse.service
+Requires=matrix-synapse.service
+
+[Service]
+Type=simple
+User=bracer-bot
+Group=bracer-bot
+WorkingDirectory=/opt/bracer-bot
+EnvironmentFile=/opt/bracer-bot/.token-env
+EnvironmentFile=/opt/bracer-bot/.env.plain
+EnvironmentFile=/opt/bracer-bot/.env.secrets
+ExecStart=op run --env-file=/opt/bracer-bot/.env.op -- /opt/bracer-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
