@@ -271,15 +271,155 @@ if ($null -eq $Global:DefaultLogFile) {
 
 Log-Message "=== Bracer Chat Manual Install started ==="
 
-# Prompt for any missing values
-if ([string]::IsNullOrEmpty($CompanyName)) {
-    $CompanyName = Read-Host "Enter Company Name (e.g. Acme Corp)"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# ---------------------------------------------------------------------------
+# GUI: API Secret dialog
+# ---------------------------------------------------------------------------
+function Show-ApiSecretDialog {
+    $Form = New-Object System.Windows.Forms.Form
+    $Form.Text            = 'Bracer Chat — API Secret'
+    $Form.Size            = New-Object System.Drawing.Size(400, 160)
+    $Form.StartPosition   = 'CenterScreen'
+    $Form.FormBorderStyle = 'FixedDialog'
+    $Form.MaximizeBox     = $false
+    $Form.MinimizeBox     = $false
+    $Form.TopMost         = $true
+
+    $Lbl = New-Object System.Windows.Forms.Label
+    $Lbl.Text     = 'Enter the Bracer Chat API Secret:'
+    $Lbl.Location = New-Object System.Drawing.Point(14, 16)
+    $Lbl.Size     = New-Object System.Drawing.Size(360, 20)
+
+    $Txt = New-Object System.Windows.Forms.TextBox
+    $Txt.Location     = New-Object System.Drawing.Point(14, 40)
+    $Txt.Size         = New-Object System.Drawing.Size(358, 24)
+    $Txt.PasswordChar = [char]0x2022   # bullet
+
+    $BtnOK = New-Object System.Windows.Forms.Button
+    $BtnOK.Text         = 'OK'
+    $BtnOK.Location     = New-Object System.Drawing.Point(196, 82)
+    $BtnOK.Size         = New-Object System.Drawing.Size(80, 30)
+    $BtnOK.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $Form.AcceptButton  = $BtnOK
+
+    $BtnCancel = New-Object System.Windows.Forms.Button
+    $BtnCancel.Text         = 'Cancel'
+    $BtnCancel.Location     = New-Object System.Drawing.Point(292, 82)
+    $BtnCancel.Size         = New-Object System.Drawing.Size(80, 30)
+    $BtnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $Form.CancelButton      = $BtnCancel
+
+    $Form.Controls.AddRange(@($Lbl, $Txt, $BtnOK, $BtnCancel))
+
+    if ($Form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    return $Txt.Text
 }
+
+# ---------------------------------------------------------------------------
+# GUI: Company picker — fetches active companies from the registration API
+# ---------------------------------------------------------------------------
+function Show-CompanyPicker {
+    param([string]$ApiSecret)
+
+    # Fetch active companies from server
+    $Companies = @()
+    try {
+        $Headers  = @{ 'Authorization' = "Bearer $ApiSecret" }
+        $Response = Invoke-WebRequest -Uri 'https://chat.bracer.ca/api/companies' `
+                        -Headers $Headers -UseBasicParsing -ErrorAction Stop
+        $Data      = $Response.Content | ConvertFrom-Json
+        $Companies = @($Data.companies)
+    } catch {
+        Log-Message "Could not fetch company list: $($_.Exception.Message)" -Level 'WARNING'
+        # Continue — tech can still type a name manually
+    }
+
+    $Form = New-Object System.Windows.Forms.Form
+    $Form.Text            = 'Bracer Chat — Select Company'
+    $Form.Size            = New-Object System.Drawing.Size(440, 430)
+    $Form.StartPosition   = 'CenterScreen'
+    $Form.FormBorderStyle = 'FixedDialog'
+    $Form.MaximizeBox     = $false
+    $Form.MinimizeBox     = $false
+    $Form.TopMost         = $true
+
+    $LblList = New-Object System.Windows.Forms.Label
+    $LblList.Text     = 'Select an existing company:'
+    $LblList.Location = New-Object System.Drawing.Point(14, 12)
+    $LblList.Size     = New-Object System.Drawing.Size(400, 20)
+
+    $ListBox = New-Object System.Windows.Forms.ListBox
+    $ListBox.Location          = New-Object System.Drawing.Point(14, 36)
+    $ListBox.Size              = New-Object System.Drawing.Size(398, 200)
+    $ListBox.ScrollAlwaysVisible = $true
+    foreach ($Co in $Companies) { [void]$ListBox.Items.Add($Co) }
+
+    $LblNew = New-Object System.Windows.Forms.Label
+    $LblNew.Text     = 'Or enter a new company name:'
+    $LblNew.Location = New-Object System.Drawing.Point(14, 252)
+    $LblNew.Size     = New-Object System.Drawing.Size(400, 20)
+
+    $TxtNew = New-Object System.Windows.Forms.TextBox
+    $TxtNew.Location = New-Object System.Drawing.Point(14, 275)
+    $TxtNew.Size     = New-Object System.Drawing.Size(398, 24)
+
+    # Clicking a list item populates the text box
+    $ListBox.add_SelectedIndexChanged({
+        if ($null -ne $ListBox.SelectedItem) {
+            $TxtNew.Text = $ListBox.SelectedItem.ToString()
+        }
+    })
+
+    $BtnOK = New-Object System.Windows.Forms.Button
+    $BtnOK.Text         = 'OK'
+    $BtnOK.Location     = New-Object System.Drawing.Point(240, 322)
+    $BtnOK.Size         = New-Object System.Drawing.Size(80, 30)
+    $BtnOK.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $Form.AcceptButton  = $BtnOK
+
+    $BtnCancel = New-Object System.Windows.Forms.Button
+    $BtnCancel.Text         = 'Cancel'
+    $BtnCancel.Location     = New-Object System.Drawing.Point(334, 322)
+    $BtnCancel.Size         = New-Object System.Drawing.Size(80, 30)
+    $BtnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $Form.CancelButton      = $BtnCancel
+
+    $Form.Controls.AddRange(@($LblList, $ListBox, $LblNew, $TxtNew, $BtnOK, $BtnCancel))
+
+    if ($Form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+
+    $Selected = $TxtNew.Text.Trim()
+    if ([string]::IsNullOrEmpty($Selected)) {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            'Please select a company or type a new name.',
+            'Bracer Chat',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        return $null
+    }
+    return $Selected
+}
+
+# ---------------------------------------------------------------------------
+# Collect missing values — GUI if interactive, error if non-interactive
+# ---------------------------------------------------------------------------
 if ([string]::IsNullOrEmpty($ApiSecret)) {
-    $SecureSecret = Read-Host "Enter Bracer Chat API Secret" -AsSecureString
-    $ApiSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureSecret)
-    )
+    $ApiSecret = Show-ApiSecretDialog
+    if ([string]::IsNullOrEmpty($ApiSecret)) {
+        Log-Message 'Installation cancelled — no API secret provided.' -Level 'ERROR'
+        exit 1
+    }
+}
+
+if ([string]::IsNullOrEmpty($CompanyName)) {
+    $CompanyName = Show-CompanyPicker -ApiSecret $ApiSecret
+    if ([string]::IsNullOrEmpty($CompanyName)) {
+        Log-Message 'Installation cancelled — no company selected.' -Level 'ERROR'
+        exit 1
+    }
 }
 
 if ([string]::IsNullOrEmpty($CompanyName)) {

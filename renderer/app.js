@@ -164,6 +164,13 @@ function linkify(el, text) {
   }
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Yield to the browser event loop so it can process pending tasks. */
+function yieldToEventLoop() {
+  return new Promise(r => setTimeout(r, 0));
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   try {
@@ -349,6 +356,7 @@ async function loadHistory() {
 
   // Load machine room messages
   const machineEvents = await window.bracerChat.getRoomHistory(activeRoomId);
+  let renderCount = 0;
   for (const event of machineEvents) {
     if (event.type !== 'm.room.message') continue;
     const isImage = event.content && event.content.msgtype === 'm.image';
@@ -357,6 +365,7 @@ async function loadHistory() {
     const hasLink = event.content && event.content.body && URL_REGEX.test(event.content.body);
     if (event.origin_server_ts >= cutoff || pinnedIds.has(event.event_id) || isImage || isFile || hasLink) {
       renderMessage(event);
+      if (++renderCount % 20 === 0) await yieldToEventLoop();
     }
   }
 
@@ -364,10 +373,12 @@ async function loadHistory() {
   if (sessionInfo && sessionInfo.broadcastRoomId) {
     try {
       const bcastEvents = await window.bracerChat.getRoomHistory(sessionInfo.broadcastRoomId);
+      renderCount = 0;
       for (const event of bcastEvents) {
         if (event.origin_server_ts < cutoff) continue;
         if (event.type === 'm.room.message' || event.type === 'm.room.encrypted') {
           renderBroadcast(event, 'Bracer Systems Broadcast');
+          if (++renderCount % 20 === 0) await yieldToEventLoop();
         }
       }
     } catch (err) {
@@ -377,10 +388,12 @@ async function loadHistory() {
   if (sessionInfo && sessionInfo.companyRoomId) {
     try {
       const coEvents = await window.bracerChat.getRoomHistory(sessionInfo.companyRoomId);
+      renderCount = 0;
       for (const event of coEvents) {
         if (event.origin_server_ts < cutoff) continue;
         if (event.type === 'm.room.message' || event.type === 'm.room.encrypted') {
           renderBroadcast(event, `${sessionInfo.companyName} Broadcast`);
+          if (++renderCount % 20 === 0) await yieldToEventLoop();
         }
       }
     } catch (err) {

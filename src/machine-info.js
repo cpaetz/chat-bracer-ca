@@ -7,8 +7,11 @@
  * startup overhead (spawning PS repeatedly is slow).
  */
 
-const { execFileSync } = require('child_process');
-const os               = require('os');
+const { execFileSync, execFile } = require('child_process');
+const { promisify }              = require('util');
+const os                         = require('os');
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Runs a PowerShell expression, returning trimmed stdout or a fallback.
@@ -96,4 +99,22 @@ function _getIPAndMAC() {
   return { ip: chosen.ip, mac: chosen.mac };
 }
 
-module.exports = { getMachineInfo, getWindowsUser };
+/**
+ * Async version of getWindowsUser — uses execFile (non-blocking) so the
+ * main process event loop stays responsive while PowerShell runs.
+ * Called by the 60-second display-name poll in main.js.
+ */
+async function getWindowsUserAsync() {
+  const script = "$ProgressPreference = 'SilentlyContinue'; (Get-WmiObject -Class Win32_ComputerSystem).UserName";
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', script
+    ], { encoding: 'utf8', timeout: 8_000 });
+    const raw = stdout.trim();
+    return raw.includes('\\') ? raw.split('\\').pop() : (raw || 'Unknown');
+  } catch {
+    return 'Unknown';
+  }
+}
+
+module.exports = { getMachineInfo, getWindowsUser, getWindowsUserAsync };

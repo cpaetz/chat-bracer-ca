@@ -29,7 +29,7 @@ const fs   = require('fs');
 const os   = require('os');
 
 const { readSession }                    = require('./credentials');
-const { getMachineInfo, getWindowsUser } = require('./machine-info');
+const { getMachineInfo, getWindowsUser, getWindowsUserAsync } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray }        = require('./tray');
 const { createWindow, showWindow, hideWindow, sendToRenderer } = require('./window');
@@ -202,7 +202,7 @@ async function postMachineInfo() {
 
 async function checkUserChange() {
   try {
-    const user = getWindowsUser();
+    const user = await getWindowsUserAsync();
     if (user && user !== currentUser && user !== 'Unknown') {
       currentUser = user;
       const newName = `${machineInfo.hostname} (${currentUser})`;
