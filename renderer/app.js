@@ -7,7 +7,7 @@
  */
 
 // ── Constants ──────────────────────────────────────────────────────────────
-const THIRTY_DAYS_MS  = 30 * 24 * 60 * 60 * 1000;
+const RETENTION_MS    = 24 * 60 * 60 * 1000;
 const PINNED_STORAGE_KEY = 'bracerChat_pinnedMessages';
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ function renderMessage(event, prepend = false) {
 
 async function loadHistory() {
   elMessages.innerHTML = '';
-  const cutoff    = Date.now() - THIRTY_DAYS_MS;
+  const cutoff    = Date.now() - RETENTION_MS;
   const pinnedIds = new Set(loadPinned().map(p => p.event_id));
 
   // Load machine room messages
