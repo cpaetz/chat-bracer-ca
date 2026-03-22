@@ -131,7 +131,7 @@ class MatrixClient {
     return data.content_uri;
   }
 
-  /** Upload a file and send an m.file event. */
+  /** Upload a file and send an m.file event. Returns the mxc:// URI. */
   async sendFile(roomId, fileBuffer, fileName, mimeType) {
     const mxcUri = await this.uploadFile(fileBuffer, mimeType, fileName);
     const rid    = encodeURIComponent(roomId);
@@ -146,9 +146,10 @@ class MatrixClient {
         info    : { mimetype: mimeType, size: fileBuffer.length }
       }
     );
+    return mxcUri;
   }
 
-  /** Upload an image buffer and send an m.image event. */
+  /** Upload an image buffer and send an m.image event. Returns the mxc:// URI. */
   async sendImage(roomId, imageBuffer, fileName, mimeType = 'image/png') {
     const mxcUri = await this.uploadFile(imageBuffer, mimeType, fileName);
     const rid    = encodeURIComponent(roomId);
@@ -163,6 +164,7 @@ class MatrixClient {
         info    : { mimetype: mimeType, size: imageBuffer.length }
       }
     );
+    return mxcUri;
   }
 
   /**

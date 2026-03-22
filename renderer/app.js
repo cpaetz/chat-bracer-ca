@@ -333,7 +333,7 @@ async function attachFile() {
   }
 }
 
-async function sendFileByPath({ path, name, mimeType, data }) {
+async function sendFileByPath({ name, mimeType, data }) {
   const MAX = 100 * 1024 * 1024;
   if (data.byteLength > MAX) {
     showStatus(`File too large: ${(data.byteLength / 1024 / 1024).toFixed(1)} MB (max 100 MB)`);
@@ -341,8 +341,21 @@ async function sendFileByPath({ path, name, mimeType, data }) {
   }
   showStatus(`Uploading ${name}…`);
   try {
-    await window.bracerChat.sendFile(activeRoomId, data, name, mimeType);
+    const { mxcUri, fileName, mimeType: resolvedMime } =
+      await window.bracerChat.sendFile(activeRoomId, data, name, mimeType);
     hideStatus();
+
+    // Optimistic render — show file/image immediately without waiting for sync
+    const isImage   = resolvedMime && resolvedMime.startsWith('image/');
+    const msgtype   = isImage ? 'm.image' : 'm.file';
+    await renderMessage({
+      type             : 'm.room.message',
+      sender           : sessionInfo.userId,
+      event_id         : `local-${Date.now()}`,
+      content          : { msgtype, body: fileName, url: mxcUri },
+      origin_server_ts : Date.now()
+    });
+    scrollToBottom();
   } catch (err) {
     showStatus('Upload failed: ' + err.message);
   }
@@ -355,8 +368,17 @@ async function sendScreenshot() {
   showStatus('Capturing screenshot…');
 
   try {
-    await window.bracerChat.sendScreenshot(activeRoomId);
+    const { mxcUri, fileName } = await window.bracerChat.sendScreenshot(activeRoomId);
     hideStatus();
+    // Optimistic render — show screenshot immediately without waiting for sync
+    await renderMessage({
+      type             : 'm.room.message',
+      sender           : sessionInfo.userId,
+      event_id         : `local-${Date.now()}`,
+      content          : { msgtype: 'm.image', body: fileName, url: mxcUri },
+      origin_server_ts : Date.now()
+    });
+    scrollToBottom();
   } catch (err) {
     showStatus('Screenshot failed: ' + err.message, 0); // persistent
     console.error('[app] Screenshot error:', err);

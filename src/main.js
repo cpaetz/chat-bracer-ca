@@ -238,11 +238,13 @@ ipcMain.handle('open-file-dialog', async () => {
 });
 
 ipcMain.handle('send-file', async (_event, roomId, fileData, fileName, mimeType) => {
-  const buf = Buffer.from(fileData);
+  const buf          = Buffer.from(fileData);
   if (buf.length > MAX_FILE_BYTES) {
     throw new Error(`File exceeds 100 MB limit (${(buf.length / 1024 / 1024).toFixed(1)} MB)`);
   }
-  await matrixClient.sendFile(roomId, buf, fileName, mimeType || 'application/octet-stream');
+  const resolvedMime = mimeType || 'application/octet-stream';
+  const mxcUri       = await matrixClient.sendFile(roomId, buf, fileName, resolvedMime);
+  return { mxcUri, fileName, mimeType: resolvedMime };
 });
 
 ipcMain.handle('send-screenshot', async (_event, roomId) => {
@@ -254,7 +256,8 @@ ipcMain.handle('send-screenshot', async (_event, roomId) => {
 
   const pngBuffer = sources[0].thumbnail.toPNG();
   const fileName  = `screenshot-${Date.now()}.png`;
-  await matrixClient.sendImage(roomId, pngBuffer, fileName, 'image/png');
+  const mxcUri    = await matrixClient.sendImage(roomId, pngBuffer, fileName, 'image/png');
+  return { mxcUri, fileName };
 });
 
 ipcMain.handle('resolve-media-url', (_event, mxcUri) => {
