@@ -107,6 +107,45 @@ body {
   display: none;
 }
 
+#search-count {
+  font-size  : 11px;
+  color      : var(--color-text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width  : 42px;
+  text-align : center;
+}
+
+#search-nav {
+  display    : none;
+  align-items: center;
+  gap        : 2px;
+  flex-shrink: 0;
+}
+
+#search-nav.visible {
+  display: flex;
+}
+
+#search-prev,
+#search-next {
+  background   : none;
+  border       : 1px solid var(--color-border);
+  border-radius: 4px;
+  cursor       : pointer;
+  font-size    : 13px;
+  line-height  : 1;
+  padding      : 2px 6px;
+  color        : var(--color-text-secondary);
+}
+
+#search-prev:hover,
+#search-next:hover {
+  background  : var(--color-surface);
+  color       : var(--color-primary);
+  border-color: var(--color-primary);
+}
+
 #search-clear {
   background   : none;
   border       : none;
@@ -127,13 +166,16 @@ body {
   color: var(--color-primary);
 }
 
-.message.search-hidden {
-  display: none;
+mark.search-highlight {
+  background   : #FFF59D;
+  color        : inherit;
+  border-radius: 2px;
+  padding      : 0 1px;
 }
 
-.message.search-match .body {
-  background   : #FFF9C4;
-  border-radius: 3px;
+mark.search-highlight.active {
+  background: #FF9800;
+  color     : #fff;
 }
 
 /* ── Message list ───────────────────────────────────────────────────────── */

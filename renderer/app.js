@@ -902,30 +902,119 @@ elBtnEmoji.addEventListener('click', (e) => {
 
 // ── Search ─────────────────────────────────────────────────────────────────
 
-function applySearch() {
-  const query = elSearchInput.value.trim().toLowerCase();
+const elSearchCount = document.getElementById('search-count');
+const elSearchNav   = document.getElementById('search-nav');
+const elSearchPrev  = document.getElementById('search-prev');
+const elSearchNext  = document.getElementById('search-next');
 
+let searchMarks = [];
+let searchIdx   = -1;
+
+/** Remove all <mark> elements created by the last search, restoring original text nodes. */
+function clearSearchMarks() {
+  for (const mark of searchMarks) {
+    const parent = mark.parentNode;
+    if (!parent) continue;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  }
+  searchMarks = [];
+  searchIdx   = -1;
+}
+
+/** Walk a DOM subtree and wrap every occurrence of `query` (lowercase) in a <mark>. */
+function walkAndMark(node, query) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text  = node.textContent;
+    const lower = text.toLowerCase();
+    let pos = 0, idx;
+    const frag  = document.createDocumentFragment();
+    let   found = false;
+
+    while ((idx = lower.indexOf(query, pos)) !== -1) {
+      found = true;
+      if (idx > pos) frag.appendChild(document.createTextNode(text.slice(pos, idx)));
+      const mark = document.createElement('mark');
+      mark.className   = 'search-highlight';
+      mark.textContent = text.slice(idx, idx + query.length);
+      frag.appendChild(mark);
+      searchMarks.push(mark);
+      pos = idx + query.length;
+    }
+    if (found) {
+      if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    return;
+  }
+  if (node.nodeName === 'SCRIPT' || node.nodeName === 'STYLE' || node.nodeName === 'MARK') return;
+  for (const child of Array.from(node.childNodes)) walkAndMark(child, query);
+}
+
+/** Highlight the match at `idx` and scroll it into view. */
+function activateMatch(idx) {
+  for (const m of searchMarks) m.classList.remove('active');
+  if (idx < 0 || idx >= searchMarks.length) return;
+  searchMarks[idx].classList.add('active');
+  searchMarks[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  elSearchCount.textContent = `${idx + 1} / ${searchMarks.length}`;
+}
+
+function applySearch() {
+  const query = elSearchInput.value.trim();
+  clearSearchMarks();
   elSearchClear.classList.toggle('visible', query.length > 0);
 
-  const bubbles = elMessages.querySelectorAll('.message');
-  for (const bubble of bubbles) {
-    if (!query) {
-      bubble.classList.remove('search-hidden', 'search-match');
-      continue;
-    }
-    // Check sender + body text
-    const text = (bubble.textContent || '').toLowerCase();
-    if (text.includes(query)) {
-      bubble.classList.remove('search-hidden');
-      bubble.classList.add('search-match');
-    } else {
-      bubble.classList.add('search-hidden');
-      bubble.classList.remove('search-match');
-    }
+  if (!query) {
+    elSearchCount.textContent = '';
+    elSearchNav.classList.remove('visible');
+    return;
   }
+
+  const lowerQuery = query.toLowerCase();
+  const bodies = elMessages.querySelectorAll('.body, .broadcast-body');
+  for (const body of bodies) walkAndMark(body, lowerQuery);
+
+  if (searchMarks.length === 0) {
+    elSearchCount.textContent = 'No results';
+    elSearchNav.classList.remove('visible');
+    return;
+  }
+
+  elSearchNav.classList.add('visible');
+  searchIdx = 0;
+  activateMatch(0);
 }
 
 elSearchInput.addEventListener('input', applySearch);
+
+elSearchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (searchMarks.length === 0) return;
+    if (e.shiftKey) {
+      searchIdx = (searchIdx - 1 + searchMarks.length) % searchMarks.length;
+    } else {
+      searchIdx = (searchIdx + 1) % searchMarks.length;
+    }
+    activateMatch(searchIdx);
+  } else if (e.key === 'Escape') {
+    elSearchInput.value = '';
+    applySearch();
+  }
+});
+
+elSearchPrev.addEventListener('click', () => {
+  if (searchMarks.length === 0) return;
+  searchIdx = (searchIdx - 1 + searchMarks.length) % searchMarks.length;
+  activateMatch(searchIdx);
+});
+
+elSearchNext.addEventListener('click', () => {
+  if (searchMarks.length === 0) return;
+  searchIdx = (searchIdx + 1) % searchMarks.length;
+  activateMatch(searchIdx);
+});
 
 elSearchClear.addEventListener('click', () => {
   elSearchInput.value = '';
