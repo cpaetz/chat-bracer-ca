@@ -14,6 +14,7 @@ const PINNED_STORAGE_KEY = 'bracerChat_pinnedMessages';
 let sessionInfo  = null;
 let activeRoomId = null;
 let ctxTargetEventId = null; // event_id of the message the context menu opened on
+const renderedBroadcastIds = new Set(); // dedup broadcast events
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const elRoomName    = document.getElementById('room-name');
@@ -32,6 +33,13 @@ const elPinnedList  = document.getElementById('pinned-list');
 const elPinnedCount = document.getElementById('pinned-count');
 const elCtxMenu     = document.getElementById('ctx-menu');
 const elCtxPin      = document.getElementById('ctx-pin');
+const elSearchInput = document.getElementById('search-input');
+const elSearchClear = document.getElementById('search-clear');
+const elBtnEmoji         = document.getElementById('btn-emoji');
+const elEmojiPicker      = document.getElementById('emoji-picker');
+const elEmojiGrid        = document.getElementById('emoji-grid');
+const elEmojiRecentGrid  = document.getElementById('emoji-recent-grid');
+const elEmojiRecentSec   = document.getElementById('emoji-recent-section');
 
 // ── Pinned messages (localStorage) ─────────────────────────────────────────
 
@@ -120,6 +128,42 @@ function renderPinnedPanel() {
   }
 }
 
+// ── Linkify ────────────────────────────────────────────────────────────────
+
+const URL_REGEX = /https?:\/\/[^\s<>"']+/g;
+
+/**
+ * Populates `el` with text and clickable links parsed from `text`.
+ * Safe: builds DOM nodes directly — no innerHTML.
+ */
+function linkify(el, text) {
+  let last = 0;
+  let match;
+  URL_REGEX.lastIndex = 0;
+  while ((match = URL_REGEX.exec(text)) !== null) {
+    // Text before the URL
+    if (match.index > last) {
+      el.appendChild(document.createTextNode(text.slice(last, match.index)));
+    }
+    // The URL itself
+    const url = match[0];
+    const a   = document.createElement('a');
+    a.textContent = url;
+    a.href        = '#';
+    a.className   = 'msg-link';
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.bracerChat.openExternal(url);
+    });
+    el.appendChild(a);
+    last = match.index + url.length;
+  }
+  // Remaining text after last URL
+  if (last < text.length) {
+    el.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   try {
@@ -128,6 +172,7 @@ async function init() {
 
     elRoomName.textContent   = `Support — ${sessionInfo.hostname}`;
     elConnStatus.textContent = 'Loading history…';
+    console.log('[app] sessionInfo:', JSON.stringify(sessionInfo));
 
     renderPinnedPanel();
     await loadHistory();
@@ -180,7 +225,7 @@ function senderLabel(userId) {
 /**
  * Builds and appends (or prepends) a message bubble.
  */
-async function renderMessage(event, prepend = false) {
+function renderMessage(event, prepend = false) {
   if (!event || !event.content) return;
 
   const isOwn  = sessionInfo && event.sender === sessionInfo.userId;
@@ -205,9 +250,11 @@ async function renderMessage(event, prepend = false) {
   const bodyEl = document.createElement('div');
   bodyEl.className = 'body';
 
+  let imgElForCopy = null; // set in m.image case so copy button can grab the loaded image
+
   switch (content.msgtype) {
     case 'm.text': {
-      bodyEl.textContent = content.body || '';
+      linkify(bodyEl, content.body || '');
       break;
     }
 
@@ -215,16 +262,19 @@ async function renderMessage(event, prepend = false) {
       if (content.url) {
         const img = document.createElement('img');
         img.alt   = content.body || 'image';
-        const httpUrl = await window.bracerChat.resolveMediaUrl(content.url);
-        if (httpUrl) {
-          img.src = httpUrl;
-          // Open full-size via OS (uses auth download, not browser)
-          img.style.cursor = 'pointer';
-          img.addEventListener('click', () => {
-            window.bracerChat.downloadFile(content.url, content.body || 'image.png');
-          });
-        }
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', () => {
+          window.bracerChat.openImageInApp(content.url, content.body || 'image.png');
+        });
         bodyEl.appendChild(img);
+        imgElForCopy = img; // reference for copy button
+        // Resolve URL async without blocking bubble render
+        window.bracerChat.resolveMediaUrl(content.url).then(httpUrl => {
+          if (httpUrl) {
+            img.addEventListener('load', scrollToBottom);
+            img.src = httpUrl;
+          }
+        });
       } else {
         bodyEl.textContent = content.body || '[image]';
       }
@@ -266,6 +316,9 @@ async function renderMessage(event, prepend = false) {
   timeEl.textContent = formatTime(event.origin_server_ts);
   wrap.appendChild(timeEl);
 
+  // Copy button
+  wrap.appendChild(makeCopyBtn(event, undefined, imgElForCopy));
+
   // Store event data on the element for context menu and ordering
   wrap._matrixEvent = event;
 
@@ -291,17 +344,50 @@ async function renderMessage(event, prepend = false) {
 
 async function loadHistory() {
   elMessages.innerHTML = '';
-  const events      = await window.bracerChat.getRoomHistory(activeRoomId);
-  const cutoff      = Date.now() - THIRTY_DAYS_MS;
-  const pinnedIds   = new Set(loadPinned().map(p => p.event_id));
+  const cutoff    = Date.now() - THIRTY_DAYS_MS;
+  const pinnedIds = new Set(loadPinned().map(p => p.event_id));
 
-  for (const event of events) {
+  // Load machine room messages
+  const machineEvents = await window.bracerChat.getRoomHistory(activeRoomId);
+  for (const event of machineEvents) {
     if (event.type !== 'm.room.message') continue;
-    // Show if within 30 days OR pinned
-    if (event.origin_server_ts >= cutoff || pinnedIds.has(event.event_id)) {
-      await renderMessage(event);
+    const isImage = event.content && event.content.msgtype === 'm.image';
+    const isFile  = event.content && event.content.msgtype === 'm.file';
+    URL_REGEX.lastIndex = 0;
+    const hasLink = event.content && event.content.body && URL_REGEX.test(event.content.body);
+    if (event.origin_server_ts >= cutoff || pinnedIds.has(event.event_id) || isImage || isFile || hasLink) {
+      renderMessage(event);
     }
   }
+
+  // Load broadcast room history and render as broadcast announcements
+  if (sessionInfo && sessionInfo.broadcastRoomId) {
+    try {
+      const bcastEvents = await window.bracerChat.getRoomHistory(sessionInfo.broadcastRoomId);
+      for (const event of bcastEvents) {
+        if (event.origin_server_ts < cutoff) continue;
+        if (event.type === 'm.room.message' || event.type === 'm.room.encrypted') {
+          renderBroadcast(event, 'Bracer Systems Broadcast');
+        }
+      }
+    } catch (err) {
+      console.warn('[app] Could not load broadcast history:', err.message);
+    }
+  }
+  if (sessionInfo && sessionInfo.companyRoomId) {
+    try {
+      const coEvents = await window.bracerChat.getRoomHistory(sessionInfo.companyRoomId);
+      for (const event of coEvents) {
+        if (event.origin_server_ts < cutoff) continue;
+        if (event.type === 'm.room.message' || event.type === 'm.room.encrypted') {
+          renderBroadcast(event, `${sessionInfo.companyName} Broadcast`);
+        }
+      }
+    } catch (err) {
+      console.warn('[app] Could not load company broadcast history:', err.message);
+    }
+  }
+
   scrollToBottom();
 }
 
@@ -309,13 +395,140 @@ function scrollToBottom() {
   elMessages.scrollTop = elMessages.scrollHeight;
 }
 
+// ── Notification sound ─────────────────────────────────────────────────────
+
+let audioCtx = null;
+
+function playNotificationSound() {
+  try {
+    if (!audioCtx) audioCtx = new AudioContext();
+    // AudioContext may be suspended until a user gesture has occurred
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.type            = 'sine';
+    osc.frequency.value = 880; // A5 — soft, high ding
+
+    const t = audioCtx.currentTime;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.18, t + 0.01); // quick attack
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4); // decay
+
+    osc.start(t);
+    osc.stop(t + 0.4);
+  } catch (err) {
+    // Audio not available — fail silently
+  }
+}
+
 // ── Incoming messages (from sync loop) ────────────────────────────────────
 
 async function handleIncomingMessage({ roomId, event }) {
-  if (roomId !== activeRoomId) return;
   if (event.event_id && document.querySelector(`[data-event-id="${event.event_id}"]`)) return;
-  await renderMessage(event);
+
+  // Broadcast rooms — render as announcement above the chat
+  if (sessionInfo && roomId === sessionInfo.broadcastRoomId) {
+    playNotificationSound();
+    renderBroadcast(event, 'Bracer Systems Broadcast');
+    scrollToBottom();
+    return;
+  }
+  if (sessionInfo && roomId === sessionInfo.companyRoomId) {
+    playNotificationSound();
+    renderBroadcast(event, `${sessionInfo.companyName} Broadcast`);
+    scrollToBottom();
+    return;
+  }
+
+  if (roomId !== activeRoomId) return;
+
+  const isOwn = sessionInfo && event.sender === sessionInfo.userId;
+  if (!isOwn) playNotificationSound();
+
+  renderMessage(event);
+  applySearch();
   scrollToBottom();
+}
+
+function makeCopyBtn(event, textOverride, imgEl) {
+  const btn = document.createElement('button');
+  btn.className   = 'copy-btn';
+  btn.textContent = 'Copy';
+  btn.title       = imgEl ? 'Copy image to clipboard' : 'Copy message text';
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+
+    if (imgEl && imgEl.src && imgEl.src.startsWith('data:')) {
+      // Copy full-res image via Electron native clipboard
+      window.bracerChat.clipboardWriteImage(imgEl.src).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      }).catch(() => {});
+      return;
+    }
+
+    // Copy text via execCommand
+    const body = textOverride !== undefined ? textOverride
+      : (event.content && event.content.body ? event.content.body : '');
+    const ts   = event.origin_server_ts ? `[${formatTime(event.origin_server_ts)}] ` : '';
+    const text = ts + body;
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  });
+  return btn;
+}
+
+function renderBroadcast(event, label) {
+  if (!event.content) return;
+  // Deduplicate — same event can arrive via both history load and live sync
+  const dedupKey = event.event_id || `${event.origin_server_ts}_${event.sender}`;
+  if (renderedBroadcastIds.has(dedupKey)) return;
+  renderedBroadcastIds.add(dedupKey);
+
+  const wrap = document.createElement('div');
+  wrap.className       = 'broadcast-message';
+  wrap.dataset.eventId = event.event_id || '';
+  wrap._matrixEvent    = event;
+
+  const labelEl = document.createElement('div');
+  labelEl.className   = 'broadcast-label';
+  labelEl.textContent = label + ':';
+
+  const box = document.createElement('div');
+  box.className = 'broadcast-box';
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'broadcast-body';
+  const bodyText = event.type === 'm.room.message'
+    ? (event.content.body || '')
+    : '[Encrypted broadcast — message cannot be displayed. Ask your admin to disable encryption on this room.]';
+  linkify(bodyEl, bodyText);
+
+  const timeEl = document.createElement('div');
+  timeEl.className   = 'time';
+  timeEl.textContent = formatTime(event.origin_server_ts);
+
+  box.appendChild(bodyEl);
+  box.appendChild(timeEl);
+  box.appendChild(makeCopyBtn(event, bodyText));
+  wrap.appendChild(labelEl);
+  wrap.appendChild(box);
+  elMessages.appendChild(wrap);
 }
 
 // ── Send message ───────────────────────────────────────────────────────────
@@ -333,7 +546,7 @@ async function sendMessage() {
 
     // Optimistic render — show own message immediately without waiting for sync
     const localEventId = `local-${Date.now()}`;
-    await renderMessage({
+    renderMessage({
       type             : 'm.room.message',
       sender           : sessionInfo.userId,
       event_id         : localEventId,
@@ -381,7 +594,7 @@ async function sendFileByPath({ name, mimeType, data }) {
     // Optimistic render — show file/image immediately without waiting for sync
     const isImage   = resolvedMime && resolvedMime.startsWith('image/');
     const msgtype   = isImage ? 'm.image' : 'm.file';
-    await renderMessage({
+    renderMessage({
       type             : 'm.room.message',
       sender           : sessionInfo.userId,
       event_id         : `local-${Date.now()}`,
@@ -404,7 +617,7 @@ async function sendScreenshot() {
     const { mxcUri, fileName } = await window.bracerChat.sendScreenshot(activeRoomId);
     hideStatus();
     // Optimistic render — show screenshot immediately without waiting for sync
-    await renderMessage({
+    renderMessage({
       type             : 'm.room.message',
       sender           : sessionInfo.userId,
       event_id         : `local-${Date.now()}`,
@@ -464,7 +677,7 @@ function hideCtxMenu() {
 }
 
 elMessages.addEventListener('contextmenu', (e) => {
-  const bubble = e.target.closest('.message');
+  const bubble = e.target.closest('.message') || e.target.closest('.broadcast-message');
   if (!bubble || !bubble._matrixEvent) return;
 
   e.preventDefault();
@@ -556,6 +769,245 @@ document.addEventListener('drop', (e) => {
   };
   reader.readAsArrayBuffer(file);
 });
+
+// ── Emoji picker ───────────────────────────────────────────────────────────
+
+const EMOJIS = [
+  // Smileys
+  '😀','😃','😄','😁','😆','😅','😂','🤣',
+  '😊','😇','🙂','😉','😌','😍','🥰','😘',
+  '😋','😛','😜','🤪','😎','🤩','🥳','😏',
+  '😐','😑','😶','🙄','😯','😲','😴','🤔',
+  '😭','😢','😤','😠','😡','🤬','😱','😨',
+  '😰','😓','🤗','🤭','🤫','😷','🤒','🤕',
+  // Gestures & people
+  '👍','👎','👌','🤙','👋','🤝','🙏','💪',
+  '👏','🤦','🤷','🙌','👀','💀','🎉','🔥',
+  // Hearts & symbols
+  '❤️','🧡','💛','💚','💙','💜','🖤','💔',
+  '💯','✅','❌','⚠️','❓','❗','💡','🔗',
+  // Work & misc
+  '📎','📋','📁','📧','📞','🖥️','⌨️','🖱️',
+  '🔒','🔓','🔑','⭐','🚀','🛑','✔️','➡️'
+];
+
+const RECENT_EMOJI_KEY = 'bracerChat_recentEmojis';
+const MAX_RECENT       = 16;
+
+function loadRecentEmojis() {
+  try { return JSON.parse(localStorage.getItem(RECENT_EMOJI_KEY) || '[]'); }
+  catch { localStorage.removeItem(RECENT_EMOJI_KEY); return []; }
+}
+
+function saveRecentEmoji(emoji) {
+  const recent = [emoji, ...loadRecentEmojis().filter(e => e !== emoji)].slice(0, MAX_RECENT);
+  localStorage.setItem(RECENT_EMOJI_KEY, JSON.stringify(recent));
+}
+
+function renderRecentEmojis() {
+  const recent = loadRecentEmojis();
+  elEmojiRecentSec.style.display = recent.length ? '' : 'none';
+  elEmojiRecentGrid.innerHTML = '';
+  for (const emoji of recent) {
+    const btn = makeEmojiBtn(emoji);
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      insertAtCursor(elMsgInput, emoji);
+      saveRecentEmoji(emoji);
+      renderRecentEmojis();
+      closeEmojiPicker();
+      document.removeEventListener('click', onOutsideClick);
+      elMsgInput.focus();
+      autoResizeTextarea();
+    });
+    elEmojiRecentGrid.appendChild(btn);
+  }
+}
+
+function insertAtCursor(el, text) {
+  const start = el.selectionStart ?? el.value.length;
+  const end   = el.selectionEnd   ?? el.value.length;
+  el.value = el.value.slice(0, start) + text + el.value.slice(end);
+  const pos = start + text.length;
+  el.setSelectionRange(pos, pos);
+}
+
+function closeEmojiPicker() {
+  elEmojiPicker.classList.remove('visible');
+}
+
+function openEmojiPicker() {
+  renderRecentEmojis();
+  elEmojiPicker.classList.add('visible');
+  // Delay outside-click listener by one tick so the opening click doesn't trigger it
+  setTimeout(() => {
+    document.addEventListener('click', onOutsideClick);
+  }, 0);
+}
+
+function onOutsideClick(e) {
+  if (!elEmojiPicker.contains(e.target) && e.target !== elBtnEmoji) {
+    closeEmojiPicker();
+    document.removeEventListener('click', onOutsideClick);
+  }
+}
+
+/**
+ * Convert a Unicode emoji to its Twemoji CDN SVG URL.
+ * Strips variation selector U+FE0F; preserves ZWJ (U+200D) for compound emojis.
+ */
+function emojiToTwemojiUrl(emoji) {
+  const cps = [];
+  for (const char of emoji) {
+    const cp = char.codePointAt(0);
+    if (cp === 0xFE0F) continue; // variation selector — excluded from filename
+    cps.push(cp.toString(16));
+  }
+  const code = cps.join('-');
+  return `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/${code}.svg`;
+}
+
+function makeEmojiBtn(emoji) {
+  const btn = document.createElement('button');
+  btn.textContent = emoji;
+  btn.title       = emoji;
+  return btn;
+}
+
+// Build the grid once
+for (const emoji of EMOJIS) {
+  const btn = makeEmojiBtn(emoji);
+  // Use mousedown + preventDefault so the textarea doesn't lose focus/cursor position
+  btn.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    insertAtCursor(elMsgInput, emoji);
+    saveRecentEmoji(emoji);
+    closeEmojiPicker();
+    document.removeEventListener('click', onOutsideClick);
+    elMsgInput.focus();
+    autoResizeTextarea();
+  });
+  elEmojiGrid.appendChild(btn);
+}
+
+elBtnEmoji.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (elEmojiPicker.classList.contains('visible')) {
+    closeEmojiPicker();
+    document.removeEventListener('click', onOutsideClick);
+  } else {
+    openEmojiPicker();
+  }
+});
+
+// ── Search ─────────────────────────────────────────────────────────────────
+
+function applySearch() {
+  const query = elSearchInput.value.trim().toLowerCase();
+
+  elSearchClear.classList.toggle('visible', query.length > 0);
+
+  const bubbles = elMessages.querySelectorAll('.message');
+  for (const bubble of bubbles) {
+    if (!query) {
+      bubble.classList.remove('search-hidden', 'search-match');
+      continue;
+    }
+    // Check sender + body text
+    const text = (bubble.textContent || '').toLowerCase();
+    if (text.includes(query)) {
+      bubble.classList.remove('search-hidden');
+      bubble.classList.add('search-match');
+    } else {
+      bubble.classList.add('search-hidden');
+      bubble.classList.remove('search-match');
+    }
+  }
+}
+
+elSearchInput.addEventListener('input', applySearch);
+
+elSearchClear.addEventListener('click', () => {
+  elSearchInput.value = '';
+  applySearch();
+  elSearchInput.focus();
+});
+
+// ── Export chat ────────────────────────────────────────────────────────────
+
+const elBtnExport = document.getElementById('btn-export');
+
+async function exportChat() {
+  elBtnExport.disabled = true;
+  elBtnExport.textContent = 'Exporting…';
+  try {
+    const bubbles = elMessages.querySelectorAll('.message, .broadcast-message');
+    const rows = [];
+    for (const b of bubbles) {
+      if (b.classList.contains('search-hidden')) continue;
+      const ev      = b._matrixEvent;
+      const sender  = ev ? senderLabel(ev.sender) : '';
+      const time    = ev ? formatTime(ev.origin_server_ts) : '';
+      const bodyEl  = b.querySelector('.body, .broadcast-body');
+      const bodyTxt = bodyEl ? bodyEl.innerText : '';
+      const isBcast = b.classList.contains('broadcast-message');
+      const labelEl = b.querySelector('.broadcast-label');
+      const label   = labelEl ? labelEl.textContent : '';
+      rows.push({ sender, time, body: bodyTxt, isBcast, label });
+    }
+
+    const hostname = sessionInfo ? sessionInfo.hostname : 'Unknown';
+    const exported = new Date().toLocaleString();
+
+    const rowsHtml = rows.map(r => {
+      if (r.isBcast) {
+        return `<tr class="bcast"><td colspan="3"><strong>${escHtml(r.label)}</strong> ${escHtml(r.body)}</td><td>${escHtml(r.time)}</td></tr>`;
+      }
+      return `<tr><td>${escHtml(r.sender)}</td><td>${escHtml(r.body)}</td><td>${escHtml(r.time)}</td></tr>`;
+    }).join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Bracer Chat Export — ${escHtml(hostname)}</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; font-size: 13px; color: #212121; margin: 24px; }
+  h1 { font-size: 16px; color: #E65100; }
+  p.meta { color: #757575; font-size: 12px; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  th { background: #E65100; color: #fff; padding: 6px 10px; text-align: left; font-size: 12px; }
+  td { padding: 5px 10px; vertical-align: top; border-bottom: 1px solid #eee; }
+  tr:nth-child(even) td { background: #FFF8F5; }
+  tr.bcast td { background: #FFF5F5; color: #C62828; font-size: 12px; }
+  td:last-child { white-space: nowrap; color: #757575; font-size: 11px; }
+</style></head><body>
+<h1>Bracer Chat Export</h1>
+<p class="meta">Device: ${escHtml(hostname)} &nbsp;|&nbsp; Exported: ${escHtml(exported)}</p>
+<table>
+<thead><tr><th>From</th><th>Message</th><th>Time</th></tr></thead>
+<tbody>
+${rowsHtml}
+</tbody></table>
+</body></html>`;
+
+    const defaultName = `bracer-chat-${hostname}-${new Date().toISOString().slice(0,10)}.html`;
+    await window.bracerChat.saveTextFile({ content: html, defaultName });
+  } catch (err) {
+    showStatus('Export failed: ' + err.message);
+  } finally {
+    elBtnExport.disabled = false;
+    elBtnExport.textContent = 'Export';
+  }
+}
+
+function escHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+elBtnExport.addEventListener('click', exportChat);
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 init();

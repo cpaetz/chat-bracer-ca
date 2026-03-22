@@ -1,3 +1,9 @@
+/* ── Noto Color Emoji font ──────────────────────────────────────────────── */
+@font-face {
+  font-family: 'NotoColorEmoji';
+  src: url('../assets/fonts/NotoColorEmoji.ttf') format('truetype');
+}
+
 /* ── Reset & variables ──────────────────────────────────────────────────── */
 :root {
   --color-primary       : #E65100;
@@ -69,6 +75,67 @@ body {
   display: block;
 }
 
+/* ── Search bar ─────────────────────────────────────────────────────────── */
+#search-bar {
+  display    : flex;
+  align-items: center;
+  gap        : 4px;
+  padding    : 6px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background : var(--color-surface);
+  flex-shrink: 0;
+}
+
+#search-input {
+  flex        : 1;
+  border      : 1px solid var(--color-border);
+  border-radius: 5px;
+  padding     : 5px 9px;
+  font-family : inherit;
+  font-size   : 13px;
+  outline     : none;
+  background  : var(--color-bg);
+  color       : var(--color-text);
+}
+
+#search-input:focus {
+  border-color: var(--color-primary);
+}
+
+/* Hide browser-native clear button — we have our own */
+#search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+#search-clear {
+  background   : none;
+  border       : none;
+  cursor       : pointer;
+  font-size    : 18px;
+  line-height  : 1;
+  color        : var(--color-text-secondary);
+  padding      : 0 4px;
+  display      : none;
+  flex-shrink  : 0;
+}
+
+#search-clear.visible {
+  display: block;
+}
+
+#search-clear:hover {
+  color: var(--color-primary);
+}
+
+.message.search-hidden {
+  display: none;
+}
+
+.message.search-match .body {
+  background   : #FFF9C4;
+  border-radius: 3px;
+}
+
 /* ── Message list ───────────────────────────────────────────────────────── */
 #messages {
   flex          : 1;
@@ -123,6 +190,17 @@ body {
   cursor       : pointer;
 }
 
+.message .msg-link {
+  color          : var(--color-primary);
+  text-decoration: underline;
+  cursor         : pointer;
+  word-break     : break-all;
+}
+
+.message .msg-link:hover {
+  color: var(--color-primary-dark);
+}
+
 .message .file-link {
   color          : var(--color-primary);
   text-decoration: underline;
@@ -157,15 +235,10 @@ body {
 }
 
 #compose-action-row {
-  display        : flex;
-  align-items    : center;
-  justify-content: space-between;
-  gap            : 6px;
-}
-
-#compose-action-left {
-  display: flex;
-  gap    : 6px;
+  display    : flex;
+  align-items: center;
+  gap        : 6px;
+  flex-wrap  : wrap;
 }
 
 .compose-btn {
@@ -351,6 +424,88 @@ body {
   border-radius : 10px;
 }
 
+/* ── Copy button ─────────────────────────────────────────────────────────── */
+.message {
+  position: relative;
+}
+
+.copy-btn {
+  position  : absolute;
+  top       : 6px;
+  right     : 6px;
+  background: rgba(255,255,255,0.85);
+  border    : 1px solid var(--color-border);
+  border-radius: 4px;
+  padding   : 1px 5px;
+  font-size : 11px;
+  cursor    : pointer;
+  color     : var(--color-text-secondary);
+  opacity   : 0;
+  transition: opacity 0.15s;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.message:hover .copy-btn {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  background  : var(--color-surface);
+  color       : var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.copy-btn.copied {
+  color       : #2e7d32;
+  border-color: #2e7d32;
+}
+
+/* Broadcast copy button stays visible (no hover-to-show needed) */
+.broadcast-box {
+  position: relative;
+}
+
+.broadcast-box .copy-btn {
+  opacity: 1;
+  background: rgba(255,255,255,0.9);
+}
+
+/* ── Broadcast messages ──────────────────────────────────────────────────── */
+@keyframes broadcast-flash {
+  0%, 100% { border-color: #C62828; box-shadow: 0 0 6px rgba(198,40,40,0.5); }
+  50%       { border-color: #ff1a1a; box-shadow: 0 0 14px rgba(255,26,26,0.85); }
+}
+
+.broadcast-message {
+  width: 100%;
+}
+
+.broadcast-label {
+  font-size  : 11px;
+  font-weight: 700;
+  color      : #C62828;
+  letter-spacing: 0.3px;
+  margin-bottom : 4px;
+  padding-left  : 2px;
+}
+
+.broadcast-box {
+  border       : 2px solid #C62828;
+  border-radius: 8px;
+  padding      : 10px 14px;
+  background   : #FFF5F5;
+  animation    : broadcast-flash 1.2s ease-in-out 5; /* flash 5 times, then stops */
+}
+
+.broadcast-body {
+  font-size  : 14px;
+  color      : var(--color-text);
+  white-space: pre-wrap;
+  word-break : break-word;
+  line-height: 1.45;
+}
+
 /* ── Context menu ────────────────────────────────────────────────────────── */
 #ctx-menu {
   position     : fixed;
@@ -386,6 +541,86 @@ body {
 .ctx-item:hover {
   background: var(--color-surface);
   color     : var(--color-primary);
+}
+
+/* ── Emoji picker ────────────────────────────────────────────────────────── */
+#emoji-picker {
+  position     : fixed;
+  bottom       : 90px;
+  left         : 12px;
+  width        : 340px;
+  max-height   : 320px;
+  overflow-y   : auto;
+  background   : #fff;
+  border       : 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow   : 0 4px 20px rgba(0,0,0,0.15);
+  z-index      : 500;
+  padding      : 10px;
+  display      : none;
+}
+
+#emoji-picker.visible {
+  display: block;
+}
+
+#emoji-grid {
+  display              : grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap                  : 3px;
+}
+
+#emoji-grid button {
+  background   : none;
+  border       : none;
+  border-radius: 6px;
+  padding      : 2px;
+  cursor       : pointer;
+  display      : flex;
+  align-items  : center;
+  justify-content: center;
+  width        : 36px;
+  height       : 36px;
+  font-size    : 26px;
+  font-family  : 'NotoColorEmoji', 'Segoe UI Emoji', sans-serif;
+  line-height  : 1;
+}
+
+#emoji-grid button:hover,
+#emoji-recent-grid button:hover {
+  background: var(--color-surface);
+}
+
+.emoji-section-label {
+  font-size   : 10px;
+  font-weight : 600;
+  color       : var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding     : 4px 2px 2px;
+}
+
+#emoji-recent-grid {
+  display              : grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap                  : 2px;
+  margin-bottom        : 4px;
+}
+
+#emoji-recent-grid button {
+  background   : none;
+  border       : none;
+  border-radius: 6px;
+  padding      : 2px;
+  cursor       : pointer;
+  display      : flex;
+  align-items  : center;
+  justify-content: center;
+  width        : 36px;
+  height       : 36px;
+  font-size    : 26px;
+  font-family  : 'NotoColorEmoji', 'Segoe UI Emoji', sans-serif;
+  line-height  : 1;
 }
 
 /* ── Open Ticket button ──────────────────────────────────────────────────── */

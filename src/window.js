@@ -22,8 +22,8 @@ let win = null;
 function createWindow(preloadPath, htmlPath) {
   const iconPath = path.join(__dirname, '..', 'assets', 'icon.ico');
   win = new BrowserWindow({
-    width       : 420,
-    height      : 620,
+    width       : 460,
+    height      : 640,
     show        : false,
     frame       : true,
     resizable   : true,
@@ -82,4 +82,6 @@ function sendToRenderer(channel, ...args) {
   }
 }
 
-module.exports = { createWindow, showWindow, hideWindow, sendToRenderer };
+function getWindow() { return win; }
+
+module.exports = { createWindow, showWindow, hideWindow, getWindow, sendToRenderer };

@@ -19,7 +19,9 @@ const {
   ipcMain,
   dialog,
   desktopCapturer,
-  shell
+  shell,
+  clipboard,
+  nativeImage
 } = require('electron');
 
 const path = require('path');
@@ -30,7 +32,21 @@ const { readSession }                    = require('./credentials');
 const { getMachineInfo, getWindowsUser } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray }        = require('./tray');
-const { createWindow, showWindow, sendToRenderer } = require('./window');
+const { createWindow, showWindow, hideWindow, sendToRenderer } = require('./window');
+const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
+
+// ── Win32 screen-capture exclusion (WDA_EXCLUDEFROMCAPTURE) ───────────────
+// Set up once at module load — koffi registers types globally and throws on duplicates.
+// HWND is passed as uintptr_t (pointer-sized integer) — passing as a koffi pointer type
+// gives Windows the address of the buffer, not the HWND value itself (ERROR_INVALID_WINDOW_HANDLE).
+const koffi  = require('koffi');
+const _user32 = koffi.load('user32.dll');
+const _SetWindowDisplayAffinity = _user32.func(
+  'bool __stdcall SetWindowDisplayAffinity(uintptr_t hWnd, uint32_t dwAffinity)'
+);
+const _GetLastError = koffi.load('kernel32.dll').func('uint32_t __stdcall GetLastError()');
+const WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+const WDA_NONE               = 0x00000000;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -54,6 +70,7 @@ let machineInfo      = null;
 let currentUser      = null;   // Currently logged-in Windows username
 let userPollInterval = null;
 let isAppQuitting    = false;
+let companyName      = null;   // Derived from company broadcast room name
 
 // ── Startup ────────────────────────────────────────────────────────────────
 
@@ -70,6 +87,9 @@ app.on('ready', async () => {
   // 2. Machine info ──────────────────────────────────────────────────────
   machineInfo  = getMachineInfo();
   currentUser  = machineInfo.windowsUser;
+
+  // 3. Startup cleanup ───────────────────────────────────────────────────
+  cleanupExpired();
 
   // 3. Create UI ─────────────────────────────────────────────────────────
   const winInstance = createWindow(
@@ -116,15 +136,26 @@ app.on('ready', async () => {
     console.error('[BracerChat] Failed to set display name:', err.message);
   }
 
+  // Derive company name from company broadcast room (e.g. "Bracer Systems — Bracer Announcements" → "Bracer Systems")
+  if (session.room_id_company) {
+    try {
+      const roomName = await matrixClient.getRoomName(session.room_id_company);
+      if (roomName) companyName = roomName.split(' — ')[0].trim();
+    } catch (err) {
+      console.warn('[BracerChat] Could not get company room name:', err.message);
+    }
+  }
+
   // 5. Listen for new messages → popup ───────────────────────────────────
   matrixClient.onMessage(({ roomId, event }) => {
     // Forward all messages to the renderer for display
     sendToRenderer('new-message', { roomId, event });
 
-    // Only trigger the popup for the machine's own support room
-    if (roomId === session.room_id_machine) {
+    // Popup for machine room and broadcast rooms
+    const isBroadcast = roomId === session.room_id_broadcast || roomId === session.room_id_company;
+    if (isBroadcast) console.log('[BracerChat] broadcast event type:', event.type, 'roomId:', roomId);
+    if (roomId === session.room_id_machine || isBroadcast) {
       showWindow(true); // alwaysOnTop for 5 s
-      // Tell renderer to expand pinned panel and scroll to this message
       sendToRenderer('focus-message', { eventId: event.event_id });
     }
   });
@@ -185,14 +216,19 @@ async function checkUserChange() {
 
 // ── IPC handlers ───────────────────────────────────────────────────────────
 
-ipcMain.handle('get-session-info', () => ({
-  userId          : session.user_id,
-  machineRoomId   : session.room_id_machine,
-  broadcastRoomId : session.room_id_broadcast,
-  companyRoomId   : session.room_id_company,
-  hostname        : machineInfo.hostname,
-  windowsUser     : currentUser
-}));
+ipcMain.handle('get-session-info', () => {
+  console.log('[BracerChat] session room IDs — machine:', session.room_id_machine,
+    'broadcast:', session.room_id_broadcast, 'company:', session.room_id_company);
+  return {
+    userId          : session.user_id,
+    machineRoomId   : session.room_id_machine,
+    broadcastRoomId : session.room_id_broadcast,
+    companyRoomId   : session.room_id_company,
+    hostname        : machineInfo.hostname,
+    windowsUser     : currentUser,
+    companyName     : companyName || 'Company'
+  };
+});
 
 ipcMain.handle('get-room-history', async (_event, roomId) => {
   return matrixClient.getRoomMessages(roomId);
@@ -237,24 +273,43 @@ ipcMain.handle('send-file', async (_event, roomId, fileData, fileName, mimeType)
 });
 
 ipcMain.handle('send-screenshot', async (_event, roomId) => {
-  const sources = await desktopCapturer.getSources({
-    types         : ['screen'],
-    thumbnailSize : { width: 1920, height: 1080 }
-  });
-  if (!sources.length) throw new Error('No screen sources available');
+  // Use WDA_EXCLUDEFROMCAPTURE to exclude this window from the DWM capture
+  // pipeline — window stays visible to the user but is absent from the screenshot.
+  const winRef = require('./window').getWindow();
+  // Read HWND as BigInt — getNativeWindowHandle() returns an 8-byte LE buffer on x64 Windows
+  const hwnd = winRef.getNativeWindowHandle().readBigUInt64LE(0);
 
-  const pngBuffer = sources[0].thumbnail.toPNG();
-  const fileName  = `screenshot-${Date.now()}.png`;
-  const mxcUri    = await matrixClient.sendImage(roomId, pngBuffer, fileName, 'image/png');
-  return { mxcUri, fileName };
+  _SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+
+  try {
+    await new Promise(r => setTimeout(r, 32));
+
+    const sources = await desktopCapturer.getSources({
+      types         : ['screen'],
+      thumbnailSize : { width: 1920, height: 1080 }
+    });
+    if (!sources.length) throw new Error('No screen sources available');
+
+    const pngBuffer = sources[0].thumbnail.toPNG();
+    const fileName  = `screenshot-${Date.now()}.png`;
+    const mxcUri    = await matrixClient.sendImage(roomId, pngBuffer, fileName, 'image/png');
+    return { mxcUri, fileName };
+  } finally {
+    _SetWindowDisplayAffinity(hwnd, WDA_NONE);
+  }
 });
 
 ipcMain.handle('resolve-media-url', async (_event, mxcUri) => {
-  // Fetch with auth in the main process and return a data: URI.
-  // This avoids network interception (which destabilises Electron's network service)
-  // and works regardless of whether the server requires auth for media.
+  // Check encrypted local cache first — avoids re-fetching on every app open.
+  const cached = readCache(mxcUri);
+  if (cached) {
+    return `data:${cached.mimeType};base64,${cached.buffer.toString('base64')}`;
+  }
+
+  // Cache miss — fetch from Matrix with auth, then cache for next time.
   try {
     const { buffer, mimeType } = await matrixClient.fetchMedia(mxcUri);
+    writeCache(mxcUri, buffer, mimeType);
     return `data:${mimeType};base64,${buffer.toString('base64')}`;
   } catch (err) {
     console.error('[BracerChat] resolve-media-url failed:', err.message);
@@ -262,11 +317,42 @@ ipcMain.handle('resolve-media-url', async (_event, mxcUri) => {
   }
 });
 
+ipcMain.handle('clipboard-write', (_event, text) => {
+  clipboard.writeText(typeof text === 'string' ? text : '');
+});
+
+ipcMain.handle('clipboard-write-image', (_event, dataUrl) => {
+  const img = nativeImage.createFromDataURL(dataUrl);
+  clipboard.writeImage(img);
+});
+
+ipcMain.handle('save-text-file', async (_event, { content, defaultName, filters }) => {
+  const { filePath, canceled } = await dialog.showSaveDialog({
+    title      : 'Export Chat',
+    defaultPath: path.join(os.homedir(), 'Downloads', defaultName || 'export.html'),
+    buttonLabel: 'Save',
+    filters    : filters || [{ name: 'HTML', extensions: ['html'] }]
+  });
+  if (canceled || !filePath) return false;
+  fs.writeFileSync(filePath, content, 'utf8');
+  await shell.showItemInFolder(filePath);
+  return true;
+});
+
 // Only allow opening https:// URLs to prevent protocol-handler abuse
 ipcMain.handle('open-external', (_event, url) => {
   if (typeof url === 'string' && url.startsWith('https://')) {
     shell.openExternal(url);
   }
+});
+
+// Open an image in the default OS photo app — saves to temp, no Save As prompt
+ipcMain.handle('open-image-in-app', async (_event, mxcUri, fileName) => {
+  const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const tmpPath  = path.join(os.tmpdir(), `bracer-img-${Date.now()}-${safeName}`);
+  const { buffer } = await matrixClient.fetchMedia(mxcUri);
+  fs.writeFileSync(tmpPath, buffer);
+  await shell.openPath(tmpPath);
 });
 
 // Download a file (with auth) — shows a native Save As dialog

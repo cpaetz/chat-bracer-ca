@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' https://chat.bracer.ca data:; style-src 'self' 'unsafe-inline';">
+        content="default-src 'self'; img-src 'self' https://chat.bracer.ca data:; style-src 'self' 'unsafe-inline'; font-src 'self';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bracer Chat</title>
   <link rel="stylesheet" href="styles.css">
@@ -16,6 +16,12 @@
   </div>
 
   <div id="status-bar"></div>
+
+  <!-- Search bar -->
+  <div id="search-bar">
+    <input id="search-input" type="search" placeholder="Search messages…" aria-label="Search messages" autocomplete="off">
+    <button id="search-clear" aria-label="Clear search" title="Clear search">×</button>
+  </div>
 
   <!-- Pinned messages panel (hidden when empty) -->
   <div id="pinned-panel" class="empty">
@@ -35,16 +41,25 @@
     <div class="ctx-item" id="ctx-pin" role="menuitem">📌 Pin message</div>
   </div>
 
+  <!-- Emoji picker popup -->
+  <div id="emoji-picker" aria-label="Emoji picker" role="dialog">
+    <div id="emoji-grid"></div>
+    <div id="emoji-recent-section" style="display:none">
+      <div class="emoji-section-label">Recently Used</div>
+      <div id="emoji-recent-grid"></div>
+    </div>
+  </div>
+
   <div id="compose">
     <div id="compose-input-row">
       <textarea id="msg-input" placeholder="Type a message…" rows="1" aria-label="Message input"></textarea>
     </div>
     <div id="compose-action-row">
-      <div id="compose-action-left">
-        <button class="compose-btn" id="btn-attach"     title="Attach file"     aria-label="Attach file">Attach</button>
-        <button class="compose-btn" id="btn-screenshot" title="Send screenshot" aria-label="Send screenshot">Screenshot</button>
-        <button id="btn-ticket" title="Open a support ticket" aria-label="Open Ticket">Open Ticket</button>
-      </div>
+      <button class="compose-btn" id="btn-emoji"      title="Emoji"           aria-label="Emoji">😊</button>
+      <button class="compose-btn" id="btn-attach"     title="Attach file"     aria-label="Attach file">Attach</button>
+      <button class="compose-btn" id="btn-screenshot" title="Send screenshot" aria-label="Send screenshot">Screenshot</button>
+      <button class="compose-btn" id="btn-export"     title="Export chat to HTML" aria-label="Export chat">Export</button>
+      <button id="btn-ticket" title="Open a support ticket" aria-label="Open Ticket">Open Ticket</button>
       <button id="btn-send" aria-label="Send message">Send</button>
     </div>
   </div>

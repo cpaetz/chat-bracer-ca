@@ -50,6 +50,18 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Download a Matrix media file (with auth) and open it with the OS. */
   downloadFile: (mxcUri, fileName) => ipcRenderer.invoke('download-file', mxcUri, fileName),
 
+  /** Open an image in the default OS photo app (temp file, no Save As). */
+  openImageInApp: (mxcUri, fileName) => ipcRenderer.invoke('open-image-in-app', mxcUri, fileName),
+
+  /** Write text to the system clipboard. */
+  clipboardWrite: (text) => ipcRenderer.invoke('clipboard-write', text),
+
+  /** Write an image (data URL) to the system clipboard. */
+  clipboardWriteImage: (dataUrl) => ipcRenderer.invoke('clipboard-write-image', dataUrl),
+
+  /** Show a Save As dialog and write text content to the chosen file. */
+  saveTextFile: (opts) => ipcRenderer.invoke('save-text-file', opts),
+
   // ── Events ─────────────────────────────────────────────────────────────
   /** Register a callback for new messages pushed from the sync loop. */
   onNewMessage: (callback) => {

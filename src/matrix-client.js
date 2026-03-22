@@ -167,6 +167,19 @@ class MatrixClient {
     return mxcUri;
   }
 
+  /** Get the m.room.name state for a room. Returns the name string or null. */
+  async getRoomName(roomId) {
+    try {
+      const rid  = encodeURIComponent(roomId);
+      const data = await this._request('GET',
+        `/_matrix/client/v3/rooms/${rid}/state/m.room.name/`
+      );
+      return data.name || null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Fetch the most recent messages in a room (returns in chronological order).
    */
