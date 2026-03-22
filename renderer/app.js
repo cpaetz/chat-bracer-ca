@@ -246,13 +246,26 @@ async function renderMessage(event, prepend = false) {
   timeEl.textContent = formatTime(event.origin_server_ts);
   wrap.appendChild(timeEl);
 
-  // Store event data on the element for context menu
+  // Store event data on the element for context menu and ordering
   wrap._matrixEvent = event;
 
   if (prepend) {
     elMessages.insertBefore(wrap, elMessages.firstChild);
   } else {
-    elMessages.appendChild(wrap);
+    // Insert in chronological order by timestamp rather than always appending.
+    // This keeps optimistic renders and sync-delivered messages in the right order.
+    const ts = event.origin_server_ts || 0;
+    let insertBefore = null;
+    const bubbles = elMessages.children;
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const sibTs = bubbles[i]._matrixEvent && bubbles[i]._matrixEvent.origin_server_ts || 0;
+      if (sibTs <= ts) {
+        insertBefore = bubbles[i].nextSibling;
+        break;
+      }
+      insertBefore = bubbles[i];
+    }
+    elMessages.insertBefore(wrap, insertBefore);
   }
 }
 
