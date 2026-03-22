@@ -51,10 +51,11 @@ param(
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-$SessionDatPath  = 'C:\ProgramData\BracerChat\session.dat'
-$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.0.exe'
-$InstallerPath   = 'C:\BracerTools\Temp\BracerChatSetup.exe'
-$RegistrationUrl = 'https://chat.bracer.ca/api/register'
+$SessionDatPath    = 'C:\ProgramData\BracerChat\session.dat'
+$InstallerUrl      = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.0.exe'
+$InstallerPath     = 'C:\BracerTools\Temp\BracerChatSetup.exe'
+$RegistrationUrl   = 'https://chat.bracer.ca/api/register'
+$InstallBasicAuth  = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('bracer-install:Kx7fGJDgBmZbqlo46V7KNTgS9vY'))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -95,7 +96,7 @@ function Install-BracerChat {
         if (-not (Test-Path -Path $TempDir)) {
             New-Item -Path $TempDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
         }
-        Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri $InstallerUrl -Headers @{ Authorization = $InstallBasicAuth } -OutFile $InstallerPath -UseBasicParsing -ErrorAction Stop
         Log-Message "Installer downloaded to ${InstallerPath}."
     } catch {
         Log-Message "Failed to download installer: $($_.Exception.Message)" -Level 'ERROR'

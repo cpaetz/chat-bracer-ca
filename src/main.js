@@ -59,6 +59,15 @@ const MAX_FILE_BYTES    = 100 * 1024 * 1024; // 100 MB — matches server upload
 // Required for Windows toast notifications and proper taskbar suppression
 app.setAppUserModelId('ca.bracer.chat');
 
+// ── Single-instance lock ───────────────────────────────────────────────────
+// If a second instance is launched (e.g. user double-clicks desktop shortcut
+// while app is already running), quit the new instance immediately.
+// The first instance handles 'second-instance' inside the ready handler
+// where winInstance is in scope.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
 // Improves stability on headless/RDP sessions common in managed environments
 app.disableHardwareAcceleration();
 
@@ -96,6 +105,11 @@ app.on('ready', async () => {
     path.join(__dirname, 'preload.js'),
     path.join(__dirname, '..', 'renderer', 'index.html')
   );
+
+  // Second instance launched (e.g. user double-clicks desktop shortcut) → show window
+  app.on('second-instance', () => {
+    showWindow(winInstance);
+  });
 
   // Close button → hide to tray (not quit)
   winInstance.on('close', (e) => {

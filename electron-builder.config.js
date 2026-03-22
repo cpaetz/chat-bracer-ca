@@ -11,11 +11,13 @@ module.exports = {
     icon: 'assets/icon.ico'
   },
   nsis: {
-    oneClick: true,
+    oneClick: false,
     perMachine: true,
-    createDesktopShortcut: false,
-    createStartMenuShortcut: false,
-    runAfterFinish: true,
+    allowElevation: true,
+    allowToChangeInstallationDirectory: false,
+    createDesktopShortcut: true,
+    createStartMenuShortcut: true,
+    runAfterFinish: false,
     deleteAppDataOnUninstall: false
   }
 };
