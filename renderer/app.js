@@ -198,7 +198,11 @@ async function renderMessage(event, prepend = false) {
         const httpUrl = await window.bracerChat.resolveMediaUrl(content.url);
         if (httpUrl) {
           img.src = httpUrl;
-          img.addEventListener('click', () => window.bracerChat.openExternal(httpUrl));
+          // Open full-size via OS (uses auth download, not browser)
+          img.style.cursor = 'pointer';
+          img.addEventListener('click', () => {
+            window.bracerChat.downloadFile(content.url, content.body || 'image.png');
+          });
         }
         bodyEl.appendChild(img);
       } else {
@@ -213,13 +217,18 @@ async function renderMessage(event, prepend = false) {
       link.textContent = content.body || 'Download file';
       link.href        = '#';
       if (content.url) {
-        const httpUrl = await window.bracerChat.resolveMediaUrl(content.url);
-        if (httpUrl) {
-          link.addEventListener('click', (e) => {
-            e.preventDefault();
-            window.bracerChat.openExternal(httpUrl);
-          });
-        }
+        const fileName = content.body || 'file';
+        link.addEventListener('click', async (e) => {
+          e.preventDefault();
+          link.textContent = 'Downloading…';
+          try {
+            await window.bracerChat.downloadFile(content.url, fileName);
+          } catch (err) {
+            showStatus('Download failed: ' + err.message);
+          } finally {
+            link.textContent = fileName;
+          }
+        });
       }
       bodyEl.appendChild(link);
       break;
@@ -288,6 +297,18 @@ async function sendMessage() {
 
   try {
     await window.bracerChat.sendMessage(activeRoomId, text);
+
+    // Optimistic render — show own message immediately without waiting for sync
+    const localEventId = `local-${Date.now()}`;
+    await renderMessage({
+      type             : 'm.room.message',
+      sender           : sessionInfo.userId,
+      event_id         : localEventId,
+      content          : { msgtype: 'm.text', body: text },
+      origin_server_ts : Date.now()
+    });
+    scrollToBottom();
+
   } catch (err) {
     showStatus('Send failed: ' + err.message);
     elMsgInput.value = text;

@@ -103,6 +103,18 @@ app.on('ready', async () => {
     }
   );
 
+  // 4a. Inject auth header for authenticated media downloads ─────────────
+  // Synapse 1.99+ requires auth on /_matrix/client/v1/media/download
+  electronSession.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${HOMESERVER_URL}/_matrix/client/v1/media/*`] },
+    (details, callback) => {
+      if (session && session.access_token) {
+        details.requestHeaders['Authorization'] = `Bearer ${session.access_token}`;
+      }
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  );
+
   // 4. Connect to Matrix ─────────────────────────────────────────────────
   matrixClient = new MatrixClient({
     homeserverUrl : HOMESERVER_URL,
@@ -254,4 +266,13 @@ ipcMain.handle('open-external', (_event, url) => {
   if (typeof url === 'string' && url.startsWith('https://')) {
     shell.openExternal(url);
   }
+});
+
+// Download a file (with auth) to a temp directory and open it with the OS
+ipcMain.handle('download-file', async (_event, mxcUri, fileName) => {
+  const { buffer, mimeType } = await matrixClient.fetchMedia(mxcUri);
+  const safeName  = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const tmpPath   = path.join(os.tmpdir(), `bracer-${Date.now()}-${safeName}`);
+  fs.writeFileSync(tmpPath, buffer);
+  await shell.openPath(tmpPath);
 });

@@ -178,14 +178,57 @@ class MatrixClient {
   }
 
   /**
-   * Convert mxc://server/mediaId → https download URL.
+   * Convert mxc://server/mediaId → authenticated https download URL.
+   * Uses the /_matrix/client/v1/media/download endpoint (requires auth header).
    * Returns null for invalid URIs.
    */
   resolveMediaUrl(mxcUri) {
     if (!mxcUri) return null;
     const m = mxcUri.match(/^mxc:\/\/([^/]+)\/(.+)$/);
     if (!m) return null;
-    return `${this.homeserverUrl}/_matrix/media/v3/download/${m[1]}/${m[2]}`;
+    return `${this.homeserverUrl}/_matrix/client/v1/media/download/${m[1]}/${m[2]}`;
+  }
+
+  /**
+   * Download media with auth headers and return as a Buffer.
+   * @param {string} mxcUri  mxc:// URI
+   * @returns {Promise<{buffer: Buffer, mimeType: string}>}
+   */
+  fetchMedia(mxcUri) {
+    const httpUrl = this.resolveMediaUrl(mxcUri);
+    if (!httpUrl) return Promise.reject(new Error('Invalid mxc URI'));
+
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(httpUrl);
+      const reqOptions = {
+        hostname : parsed.hostname,
+        port     : parsed.port || 443,
+        path     : parsed.pathname + parsed.search,
+        method   : 'GET',
+        timeout  : 60_000,
+        headers  : { 'Authorization': `Bearer ${this.accessToken}` }
+      };
+
+      const req = https.request(reqOptions, (res) => {
+        const chunks = [];
+        res.on('data',  chunk => chunks.push(chunk));
+        res.on('error', reject);
+        res.on('end', () => {
+          if (res.statusCode >= 400) {
+            reject(new Error(`Media fetch ${res.statusCode}`));
+            return;
+          }
+          resolve({
+            buffer  : Buffer.concat(chunks),
+            mimeType: res.headers['content-type'] || 'application/octet-stream'
+          });
+        });
+      });
+
+      req.on('error',   reject);
+      req.on('timeout', () => req.destroy(new Error('Media fetch timeout')));
+      req.end();
+    });
   }
 
   // ── Sync loop ────────────────────────────────────────────────────────────
@@ -231,7 +274,8 @@ class MatrixClient {
 
         this.syncToken = data.next_batch;
 
-        // Emit message events only after initial sync (avoid popups for old messages)
+        // Emit message events only after initial sync (avoid popups for old messages).
+        // Own messages are excluded — they are rendered optimistically on send.
         if (this._initialSyncDone && data.rooms && data.rooms.join) {
           for (const [roomId, roomData] of Object.entries(data.rooms.join)) {
             const events = roomData.timeline && roomData.timeline.events || [];

@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Open a URL in the system default browser (https:// only). */
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
+  /** Download a Matrix media file (with auth) and open it with the OS. */
+  downloadFile: (mxcUri, fileName) => ipcRenderer.invoke('download-file', mxcUri, fileName),
+
   // ── Events ─────────────────────────────────────────────────────────────
   /** Register a callback for new messages pushed from the sync loop. */
   onNewMessage: (callback) => {
