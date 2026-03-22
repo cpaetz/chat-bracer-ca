@@ -14,9 +14,10 @@
         $WipeSessionData    - 0 (default) to preserve session.dat, 1 to delete it
 
 .NOTES
-    Version:        1.0
+    Version:        1.1
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-22
+    Updated:        2026-03-22
     Purpose:        Bracer Chat - Phase 6 Removal Script
 #>
 
@@ -62,7 +63,7 @@ function Log-Message {
 # Main removal function
 # ---------------------------------------------------------------------------
 function Invoke-BracerChatRemove {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [int]$WipeSession = 0
     )
@@ -74,8 +75,10 @@ function Invoke-BracerChatRemove {
     try {
         $Procs = Get-Process -Name 'Bracer Chat' -ErrorAction SilentlyContinue
         if ($Procs) {
-            $Procs | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
+            if ($PSCmdlet.ShouldProcess("Bracer Chat process", "Stop-Process")) {
+                $Procs | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+            }
             Log-Message "Bracer Chat process stopped."
         } else {
             Log-Message "Bracer Chat process not running."
@@ -90,6 +93,7 @@ function Invoke-BracerChatRemove {
     if (Test-Path -Path $UninstallerPath) {
         Log-Message "Running NSIS silent uninstaller: ${UninstallerPath}"
         try {
+            if (-not $PSCmdlet.ShouldProcess($UninstallerPath, "Run NSIS silent uninstaller")) { return }
             $Proc = Start-Process -FilePath $UninstallerPath -ArgumentList '/S' -Wait -PassThru -ErrorAction Stop
             if ($Proc.ExitCode -ne 0) {
                 Log-Message "Uninstaller exited with code $($Proc.ExitCode)." -Level 'WARNING'
@@ -112,7 +116,9 @@ function Invoke-BracerChatRemove {
         if ($WipeSession -eq 1) {
             # Full wipe including session.dat
             Log-Message "WipeSessionData=1 — removing session.dat."
-            Remove-Item -Path $AppDataDir -Recurse -Force -ErrorAction SilentlyContinue
+            if ($PSCmdlet.ShouldProcess($AppDataDir, "Remove-Item -Recurse (full wipe)")) {
+                Remove-Item -Path $AppDataDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
             Log-Message "App data directory removed."
         } else {
             # Preserve session.dat; remove everything else
@@ -120,7 +126,9 @@ function Invoke-BracerChatRemove {
             $Items = Get-ChildItem -Path $AppDataDir -Force -ErrorAction SilentlyContinue |
                      Where-Object { $_.FullName -ne $SessionDatPath }
             foreach ($Item in $Items) {
-                Remove-Item -Path $Item.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                if ($PSCmdlet.ShouldProcess($Item.FullName, "Remove-Item")) {
+                    Remove-Item -Path $Item.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
             }
             if (Test-Path -Path $SessionDatPath) {
                 Log-Message "session.dat preserved at ${SessionDatPath}."
