@@ -365,6 +365,11 @@ async function loadHistory() {
   const machineEvents = await window.bracerChat.getRoomHistory(activeRoomId);
   let renderCount = 0;
   for (const event of machineEvents) {
+    if (POLL_START_TYPES.includes(event.type)) {
+      renderPoll(event);
+      if (++renderCount % 20 === 0) await yieldToEventLoop();
+      continue;
+    }
     if (event.type !== 'm.room.message') continue;
     const isImage = event.content && event.content.msgtype === 'm.image';
     const isFile  = event.content && event.content.msgtype === 'm.file';
@@ -447,6 +452,136 @@ function playNotificationSound() {
 
 // ── Incoming messages (from sync loop) ────────────────────────────────────
 
+// ── Poll rendering ─────────────────────────────────────────────────────────
+
+const POLL_START_TYPES = ['m.poll.start', 'org.matrix.msc3381.poll.start'];
+
+// Extract text from any of the various Matrix poll text formats
+function _pollText(obj) {
+  if (!obj) return '';
+  if (typeof obj === 'string') return obj;
+  // Stable array format: { "m.text": [{ "body": "..." }] }
+  const mt = obj['m.text'];
+  if (Array.isArray(mt))        return mt[0]?.body || mt[0] || '';
+  if (typeof mt === 'string')   return mt;
+  // Unstable text field
+  const ut = obj['org.matrix.msc3381.text'];
+  if (ut) return typeof ut === 'string' ? ut : (ut[0]?.body || '');
+  // Plain body fallback
+  return obj.body || '';
+}
+
+function parsePollContent(event) {
+  const c = event.content || {};
+
+  // Stable: m.poll (Matrix 1.6+, Element Web 1.11+)
+  if (c['m.poll']) {
+    const p = c['m.poll'];
+    const question = _pollText(p.question);
+    const answers  = (p.answers || []).map(a => ({
+      id  : a.id || '',
+      text: _pollText(a)
+    })).filter(a => a.text);
+    return { question, answers };
+  }
+
+  // Unstable: org.matrix.msc3381.poll.start
+  // Element Web sends answers with text in 'org.matrix.msc1767.text' (MSC1767 extensible events)
+  const u = c['org.matrix.msc3381.poll.start'];
+  if (u) {
+    const question = _pollText(u.question);
+    const answers  = (u.answers || []).map(a => ({
+      id  : a.id || '',
+      text: a['org.matrix.msc1767.text'] || _pollText(a['org.matrix.msc3381.poll.answer']) || _pollText(a)
+    })).filter(a => a.text);
+    return { question, answers };
+  }
+
+  return null;
+}
+
+function renderPoll(event, prepend = false) {
+  if (!event || !event.content) return;
+  const poll = parsePollContent(event);
+  if (!poll) return;
+
+  const isOwn = sessionInfo && event.sender === sessionInfo.userId;
+
+  const wrap = document.createElement('div');
+  wrap.className       = `message poll-message ${isOwn ? 'own' : 'other'}`;
+  wrap.dataset.eventId = event.event_id || '';
+  wrap._matrixEvent    = event;
+
+  if (event.event_id && isPinned(event.event_id)) wrap.classList.add('pinned-highlight');
+
+  const senderEl = document.createElement('div');
+  senderEl.className   = 'sender';
+  senderEl.textContent = senderLabel(event.sender);
+  wrap.appendChild(senderEl);
+
+  const card = document.createElement('div');
+  card.className = 'poll-card';
+
+  const headerEl = document.createElement('div');
+  headerEl.className   = 'poll-header';
+  headerEl.textContent = '📊 Poll';
+  card.appendChild(headerEl);
+
+  const questionEl = document.createElement('div');
+  questionEl.className   = 'poll-question';
+  questionEl.textContent = poll.question;
+  card.appendChild(questionEl);
+
+  const optionsEl = document.createElement('ul');
+  optionsEl.className = 'poll-options';
+  poll.answers.forEach(({ id, text }) => {
+    const li = document.createElement('li');
+    li.textContent       = text;
+    li.dataset.answerId  = id;
+    li.title             = 'Click to vote';
+    li.addEventListener('click', async () => {
+      if (li.classList.contains('poll-voted')) return; // already voted
+      try {
+        await window.bracerChat.sendPollResponse(activeRoomId, event.event_id, id);
+        // Visually mark the selected option
+        optionsEl.querySelectorAll('li').forEach(el => el.classList.remove('poll-selected'));
+        li.classList.add('poll-selected', 'poll-voted');
+      } catch (err) {
+        console.error('[Poll] Vote failed:', err);
+      }
+    });
+    optionsEl.appendChild(li);
+  });
+  card.appendChild(optionsEl);
+
+  wrap.appendChild(card);
+
+  const timeEl = document.createElement('div');
+  timeEl.className   = 'time';
+  timeEl.textContent = formatTime(event.origin_server_ts);
+  wrap.appendChild(timeEl);
+
+  const pinBtn = makePinBtn(event);
+  if (pinBtn) wrap.appendChild(pinBtn);
+
+  const copyText = poll.question + '\n' + poll.answers.map((a, i) => `${i + 1}. ${a.text}`).join('\n');
+  wrap.appendChild(makeCopyBtn(event, copyText));
+
+  if (prepend) {
+    elMessages.insertBefore(wrap, elMessages.firstChild);
+  } else {
+    const ts = event.origin_server_ts || 0;
+    let insertBefore = null;
+    const bubbles = elMessages.children;
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const sibTs = bubbles[i]._matrixEvent?.origin_server_ts || 0;
+      if (sibTs <= ts) { insertBefore = bubbles[i].nextSibling; break; }
+      insertBefore = bubbles[i];
+    }
+    elMessages.insertBefore(wrap, insertBefore);
+  }
+}
+
 async function handleIncomingMessage({ roomId, event }) {
   if (event.event_id && document.querySelector(`[data-event-id="${event.event_id}"]`)) return;
 
@@ -469,7 +604,11 @@ async function handleIncomingMessage({ roomId, event }) {
   const isOwn = sessionInfo && event.sender === sessionInfo.userId;
   if (!isOwn) playNotificationSound();
 
-  renderMessage(event);
+  if (POLL_START_TYPES.includes(event.type)) {
+    renderPoll(event);
+  } else {
+    renderMessage(event);
+  }
   applySearch();
   scrollToBottom();
 }
@@ -906,6 +1045,27 @@ elMsgInput.addEventListener('keydown', (e) => {
 });
 
 elMsgInput.addEventListener('input', autoResizeTextarea);
+
+// Paste image from clipboard (e.g. Win+Shift+S snip, or copy image from browser)
+elMsgInput.addEventListener('paste', (e) => {
+  const items = Array.from(e.clipboardData?.items || []);
+  const imageItem = items.find(i => i.type.startsWith('image/'));
+  if (!imageItem) return; // no image — let normal text paste proceed
+  e.preventDefault();
+  const file = imageItem.getAsFile();
+  if (!file) return;
+  const ext  = file.type === 'image/png' ? 'png'
+             : file.type === 'image/jpeg' ? 'jpg'
+             : file.type === 'image/gif'  ? 'gif'
+             : file.type === 'image/webp' ? 'webp'
+             : 'png';
+  const name = `paste-${Date.now()}.${ext}`;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    await sendFileByPath({ name, mimeType: file.type, data: reader.result });
+  };
+  reader.readAsDataURL(file);
+});
 
 elBtnAttach.addEventListener('click', attachFile);
 

@@ -538,20 +538,94 @@ mark.search-highlight.active {
   border-color: #2e7d32;
 }
 
-/* Broadcast copy button stays visible; pin reveals on hover */
+/* Broadcast buttons — hidden by default, reveal on hover (same as chat messages) */
 .broadcast-box {
   position: relative;
 }
 
-.broadcast-box .copy-btn {
-  opacity: 1;
+.broadcast-box .copy-btn,
+.broadcast-box .pin-btn {
+  opacity: 0;
   background: rgba(255,255,255,0.9);
 }
 
-.broadcast-box .pin-btn {
-  right  : 52px;
+.broadcast-box:hover .copy-btn,
+.broadcast-box:hover .pin-btn {
   opacity: 1;
-  background: rgba(255,255,255,0.9);
+}
+
+.broadcast-box .pin-btn {
+  right: 52px;
+}
+
+/* ── Poll messages ───────────────────────────────────────────────────────── */
+.poll-card {
+  background   : var(--color-surface);
+  border       : 1px solid var(--color-border);
+  border-left  : 3px solid var(--color-primary);
+  border-radius: 6px;
+  padding      : 8px 10px;
+  margin-top   : 2px;
+  min-width    : 180px;
+}
+
+.poll-header {
+  font-size  : 11px;
+  font-weight: 600;
+  color      : var(--color-primary);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.poll-question {
+  font-weight  : 600;
+  font-size    : 13px;
+  margin-bottom: 6px;
+  color        : var(--color-text);
+}
+
+.poll-options {
+  list-style : none;
+  margin     : 0;
+  padding    : 0;
+}
+
+.poll-options li {
+  font-size    : 12px;
+  color        : var(--color-text-secondary);
+  padding      : 3px 0 3px 14px;
+  position     : relative;
+  cursor       : pointer;
+  border-radius: 3px;
+  transition   : background 0.15s;
+}
+
+.poll-options li:hover {
+  background: var(--color-border);
+  color     : var(--color-text);
+}
+
+.poll-options li::before {
+  content  : '○';
+  position : absolute;
+  left     : 0;
+  color    : var(--color-primary);
+  font-size: 10px;
+  top      : 4px;
+}
+
+.poll-options li.poll-selected {
+  color      : var(--color-primary);
+  font-weight: 600;
+}
+
+.poll-options li.poll-selected::before {
+  content: '●';
+}
+
+.poll-options li.poll-voted {
+  cursor: default;
 }
 
 /* ── Broadcast messages ──────────────────────────────────────────────────── */

@@ -12,16 +12,19 @@ const fs   = require('fs');
 let tray         = null;
 let _onShow      = null;
 let _onQuit      = null;
+let _onRestart   = null;
 
 /**
  * Creates the system tray icon.
- * @param {string}   iconPath  Path to tray.png (16x16 or 32x32)
- * @param {Function} onShow    Called when user clicks the tray icon or "Open"
- * @param {Function} onQuit    Called when user clicks "Quit"
+ * @param {string}   iconPath   Path to tray.png (16x16 or 32x32)
+ * @param {Function} onShow     Called when user clicks the tray icon or "Open"
+ * @param {Function} onQuit     Called when user clicks "Quit"
+ * @param {Function} onRestart  Called when user clicks "Restart"
  */
-function createTray(iconPath, onShow, onQuit) {
-  _onShow = onShow;
-  _onQuit = onQuit;
+function createTray(iconPath, onShow, onQuit, onRestart) {
+  _onShow    = onShow;
+  _onQuit    = onQuit;
+  _onRestart = onRestart;
 
   let icon;
   if (fs.existsSync(iconPath)) {
@@ -43,9 +46,10 @@ function createTray(iconPath, onShow, onQuit) {
 
 function _rebuildMenu() {
   if (!tray) return;
-  // No Quit option — end users cannot stop the Bracer Chat agent
   const menu = Menu.buildFromTemplate([
-    { label: 'Open Bracer Chat', click: () => _onShow && _onShow() }
+    { label: 'Open Bracer Chat', click: () => _onShow    && _onShow()   },
+    { type: 'separator' },
+    { label: 'Restart',          click: () => _onRestart && _onRestart() },
   ]);
   tray.setContextMenu(menu);
 }

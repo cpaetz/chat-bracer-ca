@@ -68,6 +68,10 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Show a Save As dialog and write text content to the chosen file. */
   saveTextFile: (opts) => ipcRenderer.invoke('save-text-file', opts),
 
+  /** Submit a vote on a Matrix poll. */
+  sendPollResponse: (roomId, pollEventId, answerId) =>
+    ipcRenderer.invoke('send-poll-response', roomId, pollEventId, answerId),
+
   // ── Events ─────────────────────────────────────────────────────────────
   /** Register a callback for new messages pushed from the sync loop. */
   onNewMessage: (callback) => {

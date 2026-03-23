@@ -134,6 +134,13 @@ app.on('ready', async () => {
       clearInterval(userPollInterval);
       destroyTray();
       app.quit();
+    },
+    () => {
+      isAppQuitting = true;
+      if (matrixClient) matrixClient.stopSync();
+      clearInterval(userPollInterval);
+      app.relaunch();
+      app.quit();
     }
   );
 
@@ -251,6 +258,10 @@ ipcMain.handle('get-room-history', async (_event, roomId) => {
 
 ipcMain.handle('send-message', async (_event, roomId, text) => {
   await matrixClient.sendMessage(roomId, text);
+});
+
+ipcMain.handle('send-poll-response', async (_event, roomId, pollEventId, answerId) => {
+  await matrixClient.sendPollResponse(roomId, pollEventId, answerId);
 });
 
 ipcMain.handle('open-file-dialog', async () => {

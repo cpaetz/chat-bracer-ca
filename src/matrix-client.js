@@ -105,6 +105,20 @@ class MatrixClient {
     );
   }
 
+  /** Send a poll response (vote) for a given poll event. */
+  async sendPollResponse(roomId, pollEventId, answerId) {
+    const rid   = encodeURIComponent(roomId);
+    const txnId = this._nextTxnId();
+    await this._request(
+      'PUT',
+      `/_matrix/client/v3/rooms/${rid}/send/org.matrix.msc3381.poll.response/${txnId}`,
+      {
+        'org.matrix.msc3381.poll.response': { answers: [answerId] },
+        'm.relates_to': { rel_type: 'm.reference', event_id: pollEventId }
+      }
+    );
+  }
+
   /** Send a plain-text message to a room. */
   async sendMessage(roomId, text) {
     const rid   = encodeURIComponent(roomId);
@@ -299,8 +313,15 @@ class MatrixClient {
             for (const event of events) {
               const isMessage   = event.type === 'm.room.message';
               const isEncrypted = event.type === 'm.room.encrypted';
+              const isPoll      = event.type === 'm.poll.start' ||
+                                  event.type === 'org.matrix.msc3381.poll.start';
               const fromOther   = event.sender !== this.userId;
               if ((isMessage || isEncrypted) && fromOther) {
+                for (const handler of this._messageHandlers) {
+                  handler({ roomId, event });
+                }
+              } else if (isPoll) {
+                // Polls show for everyone including own sender
                 for (const handler of this._messageHandlers) {
                   handler({ roomId, event });
                 }
