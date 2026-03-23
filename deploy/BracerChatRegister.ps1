@@ -32,10 +32,10 @@
 # Constants
 # ---------------------------------------------------------------------------
 $SessionDatPath  = 'C:\ProgramData\BracerChat\session.dat'
-$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.0.exe'
+$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.1.exe'
 $InstallerPath   = 'C:\BracerTools\Temp\BracerChatSetup.exe'
 $RegistrationUrl = 'https://chat.bracer.ca/api/register'
-$ExpectedVersion = '1.0.0'
+$ExpectedVersion = '1.0.1'
 # Basic Auth for /install/* (bracer-install account — hardcoded per design)
 $InstallerAuthHeader = 'Basic YnJhY2VyLWluc3RhbGw6S3g3ZkdKRGdCbVpicWxvNDZWN0tOVGdTOXZZ'
 
