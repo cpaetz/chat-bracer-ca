@@ -15,11 +15,14 @@
     If a different version is installed, the new installer runs (NSIS handles upgrade).
 
     SuperOps runtime variables required (injected into global scope by policy):
-        $CompanyName         - client company name
-        $BracerChatApiSecret - shared API secret (masked policy variable)
+        $CompanyName             - client company name
+        $OpServiceAccountToken   - 1Password read-only service account token (masked policy variable)
+                                   1Password item: chat-bracer-ca > Service Account Auth Token: chat-bracer-ca-superops
+                                   All other secrets are pulled from 1Password at runtime using this token.
+                                   The token and the op CLI are removed from the machine when the script exits.
 
 .NOTES
-    Version:        2.4
+    Version:        2.5
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
     Updated:        2026-03-23
@@ -36,8 +39,49 @@ $VersionUrl      = 'https://chat.bracer.ca/install/latest.txt'
 $InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-latest.exe'
 $InstallerPath   = 'C:\BracerTools\Temp\BracerChatSetup.exe'
 $RegistrationUrl = 'https://chat.bracer.ca/api/register'
-# Basic Auth for /install/* (bracer-install account - hardcoded per design)
-$InstallerAuthHeader = 'Basic YnJhY2VyLWluc3RhbGw6S3g3ZkdKRGdCbVpicWxvNDZWN0tOVGdTOXZZ'
+$OpTempDir       = Join-Path $env:TEMP 'bracer-op'
+$OpExePath       = Join-Path $OpTempDir 'op.exe'
+$OpCliUrl        = 'https://cache.agilebits.com/dist/1P/op2/pkg/v2.33.0/op_windows_amd64_v2.33.0.zip'
+
+# ---------------------------------------------------------------------------
+# 1Password CLI bootstrap
+# Downloads op.exe to a temp folder, reads secrets into memory, then cleans up.
+# The SA token is set only as an env var — never written to disk.
+# ---------------------------------------------------------------------------
+function Install-OpCli {
+    if (Test-Path $OpExePath) { return }
+    $ZipPath = Join-Path $OpTempDir 'op.zip'
+    try {
+        New-Item -Path $OpTempDir -ItemType Directory -Force | Out-Null
+        Log-Message "Downloading 1Password CLI..."
+        Invoke-WebRequest -Uri $OpCliUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
+        Expand-Archive -Path $ZipPath -DestinationPath $OpTempDir -Force -ErrorAction Stop
+        Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+        Log-Message "1Password CLI ready."
+    } catch {
+        Log-Message "Failed to download 1Password CLI: $($_.Exception.Message)" -Level 'ERROR'
+        throw
+    }
+}
+
+function Read-OpSecret {
+    param([string]$Reference)
+    $env:OP_SERVICE_ACCOUNT_TOKEN = $OpServiceAccountToken
+    $Value = & $OpExePath read $Reference 2>$null
+    if ([string]::IsNullOrEmpty($Value)) {
+        throw "1Password read returned empty value for: $Reference"
+    }
+    return $Value
+}
+
+function Remove-OpCli {
+    $env:OP_SERVICE_ACCOUNT_TOKEN = $null
+    [System.Environment]::SetEnvironmentVariable('OP_SERVICE_ACCOUNT_TOKEN', $null, 'Process')
+    if (Test-Path $OpTempDir) {
+        Remove-Item $OpTempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Log-Message "1Password CLI removed from temp."
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -441,8 +485,8 @@ if ($null -eq $Global:DefaultLogFile) {
 
 Log-Message "=== Bracer Chat Registration Script started ==="
 
-if ([string]::IsNullOrEmpty($BracerChatApiSecret)) {
-    Log-Message 'CRITICAL: SuperOps runtime variable $BracerChatApiSecret is missing or empty.' -Level 'ERROR'
+if ([string]::IsNullOrEmpty($OpServiceAccountToken)) {
+    Log-Message 'CRITICAL: SuperOps runtime variable $OpServiceAccountToken is missing or empty.' -Level 'ERROR'
     exit 1
 }
 
@@ -452,10 +496,20 @@ if ([string]::IsNullOrEmpty($CompanyName)) {
 }
 
 try {
+    Install-OpCli
+
+    Log-Message "Reading secrets from 1Password..."
+    $BracerChatApiSecret  = Read-OpSecret 'op://chat-bracer-ca/bracer-register API secret/password'
+    $BracerInstallAuth    = Read-OpSecret 'op://chat-bracer-ca/bracer-install Basic Auth/password'
+    $InstallerAuthHeader  = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("bracer-install:${BracerInstallAuth}"))
+    Log-Message "Secrets loaded."
+
     Invoke-BracerChatDeploy -ApiSecret $BracerChatApiSecret -CompanyName $CompanyName
     Log-Message "=== Bracer Chat Registration Script completed successfully ==="
     exit 0
 } catch {
     Log-Message "=== Script failed: $($_.Exception.Message) ===" -Level 'ERROR'
     exit 1
+} finally {
+    Remove-OpCli
 }

@@ -45,7 +45,13 @@ param(
     [string]$CompanyName,
 
     [Parameter(Mandatory = $false)]
-    [string]$ApiSecret
+    [string]$ApiSecret,
+
+    [Parameter(Mandatory = $false)]
+    [string]$InstallAuth,
+
+    [Parameter(Mandatory = $false)]
+    [string]$OpServiceAccountToken
 )
 
 # ---------------------------------------------------------------------------
@@ -55,7 +61,48 @@ $SessionDatPath    = 'C:\ProgramData\BracerChat\session.dat'
 $InstallerUrl      = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.0.exe'
 $InstallerPath     = 'C:\BracerTools\Temp\BracerChatSetup.exe'
 $RegistrationUrl   = 'https://chat.bracer.ca/api/register'
-$InstallBasicAuth  = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('bracer-install:Kx7fGJDgBmZbqlo46V7KNTgS9vY'))
+$OpTempDir         = Join-Path $env:TEMP 'bracer-op'
+$OpExePath         = Join-Path $OpTempDir 'op.exe'
+$OpCliUrl          = 'https://cache.agilebits.com/dist/1P/op2/pkg/v2.33.0/op_windows_amd64_v2.33.0.zip'
+
+# ---------------------------------------------------------------------------
+# 1Password CLI bootstrap — secrets are pulled at runtime, never stored on disk.
+# The SA token is set only as a process env var and cleared on exit.
+# ---------------------------------------------------------------------------
+function Install-OpCli {
+    if (Test-Path $OpExePath) { return }
+    $ZipPath = Join-Path $OpTempDir 'op.zip'
+    try {
+        New-Item -Path $OpTempDir -ItemType Directory -Force | Out-Null
+        Log-Message "Downloading 1Password CLI..."
+        Invoke-WebRequest -Uri $OpCliUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
+        Expand-Archive -Path $ZipPath -DestinationPath $OpTempDir -Force -ErrorAction Stop
+        Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+        Log-Message "1Password CLI ready."
+    } catch {
+        Log-Message "Failed to download 1Password CLI: $($_.Exception.Message)" -Level 'ERROR'
+        throw
+    }
+}
+
+function Read-OpSecret {
+    param([string]$Reference)
+    $env:OP_SERVICE_ACCOUNT_TOKEN = $OpServiceAccountToken
+    $Value = & $OpExePath read $Reference 2>$null
+    if ([string]::IsNullOrEmpty($Value)) {
+        throw "1Password read returned empty value for: $Reference"
+    }
+    return $Value
+}
+
+function Remove-OpCli {
+    $env:OP_SERVICE_ACCOUNT_TOKEN = $null
+    [System.Environment]::SetEnvironmentVariable('OP_SERVICE_ACCOUNT_TOKEN', $null, 'Process')
+    if (Test-Path $OpTempDir) {
+        Remove-Item $OpTempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Log-Message "1Password CLI removed from temp."
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -407,13 +454,34 @@ function Show-CompanyPicker {
 # ---------------------------------------------------------------------------
 # Collect missing values — GUI if interactive, error if non-interactive
 # ---------------------------------------------------------------------------
-if ([string]::IsNullOrEmpty($ApiSecret)) {
-    $ApiSecret = Show-ApiSecretDialog
-    if ([string]::IsNullOrEmpty($ApiSecret)) {
-        Log-Message 'Installation cancelled — no API secret provided.' -Level 'ERROR'
+try {
+    if (-not [string]::IsNullOrEmpty($OpServiceAccountToken)) {
+        # Preferred path: pull all secrets from 1Password
+        Install-OpCli
+        Log-Message "Reading secrets from 1Password..."
+        $ApiSecret       = Read-OpSecret 'op://chat-bracer-ca/bracer-register API secret/password'
+        $InstallAuth     = Read-OpSecret 'op://chat-bracer-ca/bracer-install Basic Auth/password'
+        Log-Message "Secrets loaded."
+    } elseif ([string]::IsNullOrEmpty($ApiSecret)) {
+        # Fallback: prompt manually (legacy path, no 1Password CLI available)
+        $ApiSecret = Show-ApiSecretDialog
+        if ([string]::IsNullOrEmpty($ApiSecret)) {
+            Log-Message 'Installation cancelled — no API secret provided.' -Level 'ERROR'
+            exit 1
+        }
+    }
+
+    if ([string]::IsNullOrEmpty($InstallAuth)) {
+        Log-Message 'InstallAuth is required. Pass -OpServiceAccountToken or -InstallAuth. Look up value in 1Password: chat-bracer-ca > bracer-install Basic Auth.' -Level 'ERROR'
         exit 1
     }
+} catch {
+    Log-Message "Failed to load secrets: $($_.Exception.Message)" -Level 'ERROR'
+    Remove-OpCli
+    exit 1
 }
+
+$InstallBasicAuth = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("bracer-install:${InstallAuth}"))
 
 if ([string]::IsNullOrEmpty($CompanyName)) {
     $CompanyName = Show-CompanyPicker -ApiSecret $ApiSecret
@@ -441,4 +509,6 @@ try {
     Log-Message "=== Script failed: $($_.Exception.Message) ===" -Level 'ERROR'
     Write-Host "`nInstallation failed. See log at: $Global:DefaultLogFile" -ForegroundColor Red
     exit 1
+} finally {
+    Remove-OpCli
 }
