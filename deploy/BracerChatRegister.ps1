@@ -19,7 +19,7 @@
         $BracerChatApiSecret - shared API secret (masked policy variable)
 
 .NOTES
-    Version:        2.3
+    Version:        2.4
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
     Updated:        2026-03-23
@@ -310,9 +310,9 @@ function Invoke-BracerChatDeploy {
     # are not misidentified as session.dat parse failures.
     # ACL is already hardened at the top of this function.
     if ($SkipRegistration) {
-        $Installed = Install-BracerChatIfNeeded
+        Install-BracerChatIfNeeded
         Set-BracerChatAutoStart
-        if ($Installed) { Start-BracerChatAsUser }
+        Start-BracerChatAsUser  # Always run - skips internally if app already running
         return
     }
 
@@ -422,9 +422,9 @@ function Invoke-BracerChatDeploy {
     # ------------------------------------------------------------------
     # Install/update (ACL already hardened at top of function)
     # ------------------------------------------------------------------
-    $Installed = Install-BracerChatIfNeeded
+    Install-BracerChatIfNeeded
     Set-BracerChatAutoStart
-    if ($Installed) { Start-BracerChatAsUser }
+    Start-BracerChatAsUser  # Always run - skips internally if app already running
 }
 
 # ---------------------------------------------------------------------------
