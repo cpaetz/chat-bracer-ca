@@ -271,8 +271,8 @@ ipcMain.handle('get-session-info', () => {
   };
 });
 
-ipcMain.handle('get-room-history', async (_event, roomId) => {
-  return matrixClient.getRoomMessages(roomId);
+ipcMain.handle('get-room-history', async (_event, roomId, sinceTs) => {
+  return matrixClient.getRoomMessages(roomId, sinceTs || 0);
 });
 
 ipcMain.handle('send-message', async (_event, roomId, text) => {

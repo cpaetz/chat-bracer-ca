@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('bracerChat', {
 
   // ── Chat ───────────────────────────────────────────────────────────────
   /** @returns {Promise<object[]>} Array of Matrix timeline events (chronological) */
-  getRoomHistory: (roomId) => ipcRenderer.invoke('get-room-history', roomId),
+  getRoomHistory: (roomId, sinceTs) => ipcRenderer.invoke('get-room-history', roomId, sinceTs),
 
   /** @returns {Promise<void>} */
   sendMessage: (roomId, text) => ipcRenderer.invoke('send-message', roomId, text),

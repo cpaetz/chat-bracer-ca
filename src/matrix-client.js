@@ -216,13 +216,39 @@ class MatrixClient {
   /**
    * Fetch the most recent messages in a room (returns in chronological order).
    */
-  async getRoomMessages(roomId, limit = 50) {
-    const rid  = encodeURIComponent(roomId);
-    const data = await this._request(
-      'GET',
-      `/_matrix/client/v3/rooms/${rid}/messages?dir=b&limit=${limit}`
-    );
-    return (data.chunk || []).reverse();
+  /**
+   * Fetch all room messages back to sinceTs (ms epoch).
+   * Pages through the Matrix /messages API (100 per page) until the oldest
+   * event in a page is before sinceTs, then returns everything in
+   * chronological order (oldest first).
+   */
+  async getRoomMessages(roomId, sinceTs = 0) {
+    const rid      = encodeURIComponent(roomId);
+    const pageSize = 100;
+    let allEvents  = [];
+    let from       = null;
+
+    while (true) {
+      let url = `/_matrix/client/v3/rooms/${rid}/messages?dir=b&limit=${pageSize}`;
+      if (from) url += `&from=${encodeURIComponent(from)}`;
+
+      const data  = await this._request('GET', url);
+      const chunk = data.chunk || [];
+      if (chunk.length === 0) break;
+
+      allEvents = allEvents.concat(chunk);
+
+      // Stop if the oldest event in this page is before the cutoff
+      const oldest = chunk[chunk.length - 1];
+      if (oldest.origin_server_ts !== undefined && oldest.origin_server_ts < sinceTs) break;
+
+      // Stop if there are no more pages
+      if (!data.end || data.end === data.start) break;
+
+      from = data.end;
+    }
+
+    return allEvents.reverse(); // chronological order
   }
 
   /**

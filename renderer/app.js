@@ -467,8 +467,8 @@ async function loadHistory() {
   const cutoff    = Date.now() - RETENTION_MS;
   const pinnedIds = new Set(loadPinned().map(p => p.event_id));
 
-  // Load machine room messages
-  const machineEvents = await window.bracerChat.getRoomHistory(activeRoomId);
+  // Load machine room messages — paginate back to the 24-hour cutoff
+  const machineEvents = await window.bracerChat.getRoomHistory(activeRoomId, cutoff);
   let renderCount = 0;
   for (const event of machineEvents) {
     if (POLL_START_TYPES.includes(event.type)) {
@@ -490,7 +490,7 @@ async function loadHistory() {
   // Load broadcast room history and render as broadcast announcements
   if (sessionInfo && sessionInfo.broadcastRoomId) {
     try {
-      const bcastEvents = await window.bracerChat.getRoomHistory(sessionInfo.broadcastRoomId);
+      const bcastEvents = await window.bracerChat.getRoomHistory(sessionInfo.broadcastRoomId, cutoff);
       renderCount = 0;
       for (const event of bcastEvents) {
         if (event.origin_server_ts < cutoff) continue;
@@ -505,7 +505,7 @@ async function loadHistory() {
   }
   if (sessionInfo && sessionInfo.companyRoomId) {
     try {
-      const coEvents = await window.bracerChat.getRoomHistory(sessionInfo.companyRoomId);
+      const coEvents = await window.bracerChat.getRoomHistory(sessionInfo.companyRoomId, cutoff);
       renderCount = 0;
       for (const event of coEvents) {
         if (event.origin_server_ts < cutoff) continue;
