@@ -540,11 +540,11 @@ function renderPoll(event, prepend = false) {
     li.dataset.answerId  = id;
     li.title             = 'Click to vote';
     li.addEventListener('click', async () => {
-      if (li.classList.contains('poll-voted')) return; // already voted
+      if (li.classList.contains('poll-voted')) return; // already voted for this option
       try {
         await window.bracerChat.sendPollResponse(activeRoomId, event.event_id, id);
-        // Visually mark the selected option
-        optionsEl.querySelectorAll('li').forEach(el => el.classList.remove('poll-selected'));
+        // Clear all vote state, then mark the new selection (allows changing vote)
+        optionsEl.querySelectorAll('li').forEach(el => el.classList.remove('poll-selected', 'poll-voted'));
         li.classList.add('poll-selected', 'poll-voted');
       } catch (err) {
         console.error('[Poll] Vote failed:', err);

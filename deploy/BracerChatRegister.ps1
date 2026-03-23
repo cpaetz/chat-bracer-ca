@@ -19,11 +19,11 @@
         $BracerChatApiSecret - shared API secret (masked policy variable)
 
 .NOTES
-    Version:        1.9
+    Version:        2.0
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
     Updated:        2026-03-23
-    Purpose:        Bracer Chat - Phase 6 Deployment Script (install/update + ACL hardening + auto-start)
+    Purpose:        Bracer Chat - Phase 6 Deployment Script (install/update + ACL hardening + auto-start + restart on update)
 #>
 
 #Requires -Version 5.1
@@ -148,6 +148,14 @@ function Install-BracerChat {
     } catch {
         Log-Message "Failed to download installer: $($_.Exception.Message)" -Level 'ERROR'
         throw
+    }
+
+    # Stop any running instance before installing so NSIS can replace the files cleanly
+    $RunningProc = Get-Process -Name 'Bracer Chat' -ErrorAction SilentlyContinue
+    if ($RunningProc) {
+        Log-Message "Stopping running Bracer Chat instance before install."
+        Stop-Process -Name 'Bracer Chat' -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
     }
 
     # Install silently
