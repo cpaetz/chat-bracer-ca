@@ -19,11 +19,11 @@
         $BracerChatApiSecret - shared API secret (masked policy variable)
 
 .NOTES
-    Version:        2.0
+    Version:        2.2
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
     Updated:        2026-03-23
-    Purpose:        Bracer Chat - Phase 6 Deployment Script (install/update + ACL hardening + auto-start + restart on update)
+    Purpose:        Bracer Chat - Phase 6 Deployment Script (no backtick continuations for SuperOps compatibility)
 #>
 
 #Requires -Version 5.1
@@ -36,7 +36,7 @@ $VersionUrl      = 'https://chat.bracer.ca/install/latest.txt'
 $InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-latest.exe'
 $InstallerPath   = 'C:\BracerTools\Temp\BracerChatSetup.exe'
 $RegistrationUrl = 'https://chat.bracer.ca/api/register'
-# Basic Auth for /install/* (bracer-install account — hardcoded per design)
+# Basic Auth for /install/* (bracer-install account - hardcoded per design)
 $InstallerAuthHeader = 'Basic YnJhY2VyLWluc3RhbGw6S3g3ZkdKRGdCbVpicWxvNDZWN0tOVGdTOXZZ'
 
 # ---------------------------------------------------------------------------
@@ -100,25 +100,16 @@ function Set-BracerChatAcl {
         # other accounts (e.g. debug.log written by the logged-in user).
         & takeown.exe /F $Dir /R /D Y 2>&1 | Out-Null
 
-        # Reset — restores inherited permissions and clears any broken ACL
+        # Reset - restores inherited permissions and clears any broken ACL
         # state left by a previous failed run, then apply desired grants.
-        # Call icacls directly — avoids Start-Process splitting "NT AUTHORITY\SYSTEM" on the space.
         & icacls.exe $Dir /reset /T /Q | Out-Null
 
         # Pass 1: set the directory itself with (OI)(CI) so new files inherit correctly.
-        & icacls.exe $Dir /inheritance:r `
-            /grant 'BUILTIN\Administrators:(OI)(CI)F' `
-            /grant 'NT AUTHORITY\SYSTEM:(OI)(CI)F' `
-            /grant 'BUILTIN\Users:(OI)(CI)R' `
-            /Q | Out-Null
+        & icacls.exe $Dir /inheritance:r /grant 'BUILTIN\Administrators:(OI)(CI)F' /grant 'NT AUTHORITY\SYSTEM:(OI)(CI)F' /grant 'BUILTIN\Users:(OI)(CI)R' /Q | Out-Null
 
-        # Pass 2: explicitly fix existing files — icacls (OI)(CI) on files creates inherit-only
+        # Pass 2: explicitly fix existing files - icacls (OI)(CI) on files creates inherit-only
         # ACEs that do not grant access to the file itself, so files need a separate direct grant.
-        & icacls.exe "$Dir\*" /inheritance:r `
-            /grant 'BUILTIN\Administrators:F' `
-            /grant 'NT AUTHORITY\SYSTEM:F' `
-            /grant 'BUILTIN\Users:R' `
-            /T /Q | Out-Null
+        & icacls.exe "$Dir\*" /inheritance:r /grant 'BUILTIN\Administrators:F' /grant 'NT AUTHORITY\SYSTEM:F' /grant 'BUILTIN\Users:R' /T /Q | Out-Null
 
         if ($LASTEXITCODE -ne 0) {
             Log-Message "icacls exited with code ${LASTEXITCODE}." -Level 'WARNING'
@@ -141,9 +132,14 @@ function Install-BracerChat {
         if (-not (Test-Path -Path $TempDir)) {
             New-Item -Path $TempDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
         }
-        $Headers = @{ 'Authorization' = $InstallerAuthHeader }
-        Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath -Headers $Headers `
-            -UseBasicParsing -ErrorAction Stop
+        $DlParams = @{
+            Uri             = $InstallerUrl
+            OutFile         = $InstallerPath
+            Headers         = @{ 'Authorization' = $InstallerAuthHeader }
+            UseBasicParsing = $true
+            ErrorAction     = 'Stop'
+        }
+        Invoke-WebRequest @DlParams
         Log-Message "Installer downloaded to ${InstallerPath}."
     } catch {
         Log-Message "Failed to download installer: $($_.Exception.Message)" -Level 'ERROR'
@@ -187,7 +183,7 @@ function Set-BracerChatAutoStart {
     $ValName = 'BracerChat'
     try {
         Set-ItemProperty -Path $RunKey -Name $ValName -Value "`"${AppExe}`"" -Type String -Force -ErrorAction Stop
-        Log-Message "Auto-start registry key set (HKLM Run → ${AppExe})."
+        Log-Message "Auto-start registry key set (HKLM Run -> ${AppExe})."
     } catch {
         Log-Message "Failed to set auto-start registry key: $($_.Exception.Message)" -Level 'WARNING'
     }
@@ -199,19 +195,19 @@ function Set-BracerChatAutoStart {
 function Start-BracerChatAsUser {
     $AppExe = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
     if (-not (Test-Path -Path $AppExe)) {
-        Log-Message "App not found at ${AppExe} — skipping post-install launch." -Level 'WARNING'
+        Log-Message "App not found at ${AppExe} - skipping post-install launch." -Level 'WARNING'
         return
     }
 
     # Skip if already running
     if (Get-Process -Name 'Bracer Chat' -ErrorAction SilentlyContinue) {
-        Log-Message "Bracer Chat already running — skipping post-install launch."
+        Log-Message "Bracer Chat already running - skipping post-install launch."
         return
     }
 
     $WinUser = (Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
     if ([string]::IsNullOrEmpty($WinUser)) {
-        Log-Message "No user currently logged in — skipping post-install launch." -Level 'WARNING'
+        Log-Message "No user currently logged in - skipping post-install launch." -Level 'WARNING'
         return
     }
 
@@ -220,12 +216,19 @@ function Start-BracerChatAsUser {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
         $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`""
-        $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
-        $Settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
-        $Principal = New-ScheduledTaskPrincipal -UserId $WinUser -RunLevel Limited
+        $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(30)
+        $Settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable
+        $Principal = New-ScheduledTaskPrincipal -UserId $WinUser -RunLevel Limited -LogonType Interactive
 
-        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
-            -Principal $Principal -Settings $Settings -Force | Out-Null
+        $RegTaskParams = @{
+            TaskName  = $TaskName
+            Action    = $Action
+            Trigger   = $Trigger
+            Principal = $Principal
+            Settings  = $Settings
+            Force     = $true
+        }
+        Register-ScheduledTask @RegTaskParams | Out-Null
 
         Log-Message "Scheduled post-install launch for ${WinUser} (task: ${TaskName})."
     } catch {
@@ -237,12 +240,16 @@ function Start-BracerChatAsUser {
 # Install or update Bracer Chat based on installed version vs expected version
 # ---------------------------------------------------------------------------
 function Install-BracerChatIfNeeded {
-    # Fetch expected version from server manifest — no script change needed on new releases.
+    # Fetch expected version from server manifest - no script change needed on new releases.
     $ExpectedVersion = $null
     try {
-        $Headers = @{ 'Authorization' = $InstallerAuthHeader }
-        $ExpectedVersion = (Invoke-WebRequest -Uri $VersionUrl -Headers $Headers `
-            -UseBasicParsing -ErrorAction Stop).Content.Trim()
+        $VerParams = @{
+            Uri             = $VersionUrl
+            Headers         = @{ 'Authorization' = $InstallerAuthHeader }
+            UseBasicParsing = $true
+            ErrorAction     = 'Stop'
+        }
+        $ExpectedVersion = (Invoke-WebRequest @VerParams).Content.Trim()
         Log-Message "Latest version from server: ${ExpectedVersion}."
     } catch {
         Log-Message "Failed to fetch version manifest: $($_.Exception.Message). Skipping install." -Level 'WARNING'
@@ -255,9 +262,9 @@ function Install-BracerChatIfNeeded {
         return $false
     }
     if ($InstalledVer) {
-        Log-Message "Bracer Chat ${InstalledVer} installed — updating to ${ExpectedVersion}."
+        Log-Message "Bracer Chat ${InstalledVer} installed - updating to ${ExpectedVersion}."
     } else {
-        Log-Message "Bracer Chat not installed — performing fresh install."
+        Log-Message "Bracer Chat not installed - performing fresh install."
     }
     Install-BracerChat
     return $true
@@ -281,7 +288,7 @@ function Invoke-BracerChatDeploy {
     Add-Type -AssemblyName System.Security
 
     # ------------------------------------------------------------------
-    # ACL heal-first — run before any file I/O so a broken ACL from a
+    # ACL heal-first - run before any file I/O so a broken ACL from a
     # previous failed run never blocks reading or writing session.dat.
     # ------------------------------------------------------------------
     Set-BracerChatAcl
@@ -365,13 +372,15 @@ function Invoke-BracerChatDeploy {
             elevated = $false
         } | ConvertTo-Json
 
-        $Headers = @{
-            'Authorization' = "Bearer ${ApiSecret}"
-            'Content-Type'  = 'application/json'
+        $RegParams = @{
+            Uri             = $RegistrationUrl
+            Method          = 'POST'
+            Headers         = @{ 'Authorization' = "Bearer ${ApiSecret}"; 'Content-Type' = 'application/json' }
+            Body            = $Body
+            UseBasicParsing = $true
+            ErrorAction     = 'Stop'
         }
-
-        $Response  = Invoke-WebRequest -Uri $RegistrationUrl -Method POST `
-                         -Headers $Headers -Body $Body -UseBasicParsing -ErrorAction Stop
+        $Response  = Invoke-WebRequest @RegParams
         $ApiResult = $Response.Content | ConvertFrom-Json
 
         Log-Message "Registration successful. user_id=$($ApiResult.user_id)"

@@ -115,7 +115,7 @@ function Invoke-BracerChatRemove {
 
         if ($WipeSession -eq 1) {
             # Full wipe including session.dat
-            Log-Message "WipeSessionData=1 — removing session.dat."
+            Log-Message "WipeSessionData=1 - removing session.dat."
             if ($PSCmdlet.ShouldProcess($AppDataDir, "Remove-Item -Recurse (full wipe)")) {
                 Remove-Item -Path $AppDataDir -Recurse -Force -ErrorAction SilentlyContinue
             }
