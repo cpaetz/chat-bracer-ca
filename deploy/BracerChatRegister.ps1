@@ -19,7 +19,7 @@
         $BracerChatApiSecret - shared API secret (masked policy variable)
 
 .NOTES
-    Version:        1.7
+    Version:        1.8
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
     Updated:        2026-03-22
@@ -32,10 +32,10 @@
 # Constants
 # ---------------------------------------------------------------------------
 $SessionDatPath  = 'C:\ProgramData\BracerChat\session.dat'
-$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.2.exe'
+$VersionUrl      = 'https://chat.bracer.ca/install/latest.txt'
+$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-latest.exe'
 $InstallerPath   = 'C:\BracerTools\Temp\BracerChatSetup.exe'
 $RegistrationUrl = 'https://chat.bracer.ca/api/register'
-$ExpectedVersion = '1.0.2'
 # Basic Auth for /install/* (bracer-install account — hardcoded per design)
 $InstallerAuthHeader = 'Basic YnJhY2VyLWluc3RhbGw6S3g3ZkdKRGdCbVpicWxvNDZWN0tOVGdTOXZZ'
 
@@ -174,6 +174,18 @@ function Install-BracerChat {
 # Install or update Bracer Chat based on installed version vs expected version
 # ---------------------------------------------------------------------------
 function Install-BracerChatIfNeeded {
+    # Fetch expected version from server manifest — no script change needed on new releases.
+    $ExpectedVersion = $null
+    try {
+        $Headers = @{ 'Authorization' = $InstallerAuthHeader }
+        $ExpectedVersion = (Invoke-WebRequest -Uri $VersionUrl -Headers $Headers `
+            -UseBasicParsing -ErrorAction Stop).Content.Trim()
+        Log-Message "Latest version from server: ${ExpectedVersion}."
+    } catch {
+        Log-Message "Failed to fetch version manifest: $($_.Exception.Message). Skipping install." -Level 'WARNING'
+        return
+    }
+
     $InstalledVer = Get-InstalledVersion
     if ($InstalledVer -eq $ExpectedVersion) {
         Log-Message "Bracer Chat ${ExpectedVersion} already installed and up to date. Skipping install."
