@@ -168,6 +168,14 @@ class MatrixClient {
     const mxcUri = await this.uploadFile(imageBuffer, mimeType, fileName);
     const rid    = encodeURIComponent(roomId);
     const txnId  = this._nextTxnId();
+
+    // Read PNG dimensions from header (bytes 16-23) so Element renders a thumbnail.
+    // Falls back to 0x0 if buffer is too short or not a PNG.
+    let w = 0, h = 0;
+    if (mimeType === 'image/png' && imageBuffer.length >= 24) {
+      try { w = imageBuffer.readUInt32BE(16); h = imageBuffer.readUInt32BE(20); } catch (_) {}
+    }
+
     await this._request(
       'PUT',
       `/_matrix/client/v3/rooms/${rid}/send/m.room.message/${txnId}`,
@@ -175,7 +183,7 @@ class MatrixClient {
         msgtype : 'm.image',
         body    : fileName,
         url     : mxcUri,
-        info    : { mimetype: mimeType, size: imageBuffer.length }
+        info    : { mimetype: mimeType, size: imageBuffer.length, w, h }
       }
     );
     return mxcUri;

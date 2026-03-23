@@ -175,6 +175,10 @@ app.on('ready', async () => {
     // Forward all messages to the renderer for display
     sendToRenderer('new-message', { roomId, event });
 
+    // Never pop up for messages sent by this device — avoids the window
+    // flashing every time the user sends a message and it comes back via sync.
+    if (event.sender === session.user_id) return;
+
     // Popup for machine room and broadcast rooms
     const isBroadcast = roomId === session.room_id_broadcast || roomId === session.room_id_company;
     if (isBroadcast) console.log('[BracerChat] broadcast event type:', event.type, 'roomId:', roomId);
