@@ -47,16 +47,27 @@ function createWindow(preloadPath, htmlPath) {
 }
 
 /**
- * Shows the chat window.
+ * Shows the chat window with a short opacity fade-in.
+ * Starting at opacity 0 suppresses the Windows animation (which looks wrong
+ * for a skipTaskbar window that has no taskbar button to animate toward).
  * @param {boolean} alwaysOnTop  If true, window pops above everything for 5 s.
  */
 function showWindow(alwaysOnTop = false) {
   if (!win || win.isDestroyed()) return;
 
-  // Show and restore the window first, then apply alwaysOnTop
+  win.setOpacity(0);
   win.show();
   win.restore(); // un-minimize if minimized
   win.focus();
+
+  // Fade in over ~150 ms (10 steps x 15 ms)
+  let opacity = 0;
+  const fadeIn = setInterval(() => {
+    if (!win || win.isDestroyed()) { clearInterval(fadeIn); return; }
+    opacity = Math.min(1, opacity + 0.1);
+    win.setOpacity(opacity);
+    if (opacity >= 1) clearInterval(fadeIn);
+  }, 15);
 
   if (alwaysOnTop) {
     win.setAlwaysOnTop(true);
@@ -69,8 +80,24 @@ function showWindow(alwaysOnTop = false) {
   }
 }
 
+/**
+ * Hides the chat window with a short opacity fade-out.
+ */
 function hideWindow() {
-  if (win && !win.isDestroyed()) win.hide();
+  if (!win || win.isDestroyed()) return;
+
+  // Fade out over ~120 ms (8 steps x 15 ms), then hide and reset opacity
+  let opacity = 1;
+  const fadeOut = setInterval(() => {
+    if (!win || win.isDestroyed()) { clearInterval(fadeOut); return; }
+    opacity = Math.max(0, opacity - 0.125);
+    win.setOpacity(opacity);
+    if (opacity <= 0) {
+      clearInterval(fadeOut);
+      win.hide();
+      win.setOpacity(1); // Reset for next show
+    }
+  }, 15);
 }
 
 /**

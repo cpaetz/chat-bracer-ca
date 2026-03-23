@@ -72,6 +72,15 @@ contextBridge.exposeInMainWorld('bracerChat', {
   sendPollResponse: (roomId, pollEventId, answerId) =>
     ipcRenderer.invoke('send-poll-response', roomId, pollEventId, answerId),
 
+  /** Show a native Cut/Copy/Paste context menu (for text inputs). */
+  showInputContextMenu: () => ipcRenderer.send('show-input-context-menu'),
+
+  /** Fetch pinned event IDs from Matrix m.room.pinned_events state. @returns {Promise<string[]>} */
+  getPinnedEvents: (roomId) => ipcRenderer.invoke('get-pinned-events', roomId),
+
+  /** Set pinned event IDs in Matrix. Returns false if insufficient power level. @returns {Promise<boolean>} */
+  setPinnedEvents: (roomId, pinnedIds) => ipcRenderer.invoke('set-pinned-events', roomId, pinnedIds),
+
   // ── Events ─────────────────────────────────────────────────────────────
   /** Register a callback for new messages pushed from the sync loop. */
   onNewMessage: (callback) => {

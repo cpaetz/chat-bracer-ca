@@ -22,7 +22,9 @@ const {
   screen,
   shell,
   clipboard,
-  nativeImage
+  nativeImage,
+  Menu,
+  BrowserWindow
 } = require('electron');
 
 const path = require('path');
@@ -413,6 +415,27 @@ ipcMain.handle('open-image-in-app', async (_event, mxcUri, fileName) => {
   const { buffer } = await matrixClient.fetchMedia(mxcUri);
   fs.writeFileSync(tmpPath, buffer);
   await shell.openPath(tmpPath);
+});
+
+// Show a native Cut / Copy / Paste context menu for text inputs
+ipcMain.on('show-input-context-menu', (event) => {
+  const menu = Menu.buildFromTemplate([
+    { role: 'cut' },
+    { role: 'copy' },
+    { role: 'paste' },
+    { type: 'separator' },
+    { role: 'selectAll' }
+  ]);
+  menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
+});
+
+// Pinned events — read from / write to Matrix m.room.pinned_events state
+ipcMain.handle('get-pinned-events', async (_event, roomId) => {
+  return matrixClient.getPinnedEvents(roomId);
+});
+
+ipcMain.handle('set-pinned-events', async (_event, roomId, pinnedIds) => {
+  return matrixClient.setPinnedEvents(roomId, pinnedIds);
 });
 
 // Download a file (with auth) — shows a native Save As dialog

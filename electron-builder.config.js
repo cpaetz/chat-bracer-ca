@@ -18,6 +18,7 @@ module.exports = {
     createDesktopShortcut: true,
     createStartMenuShortcut: true,
     runAfterFinish: false,
-    deleteAppDataOnUninstall: false
+    deleteAppDataOnUninstall: false,
+    include: 'build/installer.nsh'
   }
 };

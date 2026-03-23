@@ -466,6 +466,19 @@ mark.search-highlight.active {
   border-radius : 10px;
 }
 
+/* ── Reply quote block ───────────────────────────────────────────────────── */
+.reply-quote {
+  border-left  : 3px solid var(--color-primary);
+  padding      : 3px 8px;
+  margin-bottom: 5px;
+  font-size    : 0.82em;
+  color        : #aaa;
+  white-space  : pre-wrap;
+  word-break   : break-word;
+  border-radius: 0 4px 4px 0;
+  background   : rgba(255,255,255,0.04);
+}
+
 /* ── Pin button ──────────────────────────────────────────────────────────── */
 .pin-btn {
   position     : absolute;

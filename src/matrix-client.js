@@ -340,6 +340,45 @@ class MatrixClient {
       }
     }
   }
+
+  /**
+   * Fetch the pinned event IDs for a room from the m.room.pinned_events state.
+   * Returns an array of event ID strings, or [] if none / not set.
+   */
+  async getPinnedEvents(roomId) {
+    const rid = encodeURIComponent(roomId);
+    try {
+      const data = await this._request(
+        'GET',
+        `/_matrix/client/v3/rooms/${rid}/state/m.room.pinned_events/`
+      );
+      return Array.isArray(data.pinned) ? data.pinned : [];
+    } catch (err) {
+      if (err.message && err.message.includes('Matrix 404')) return []; // state event doesn't exist yet
+      throw err;
+    }
+  }
+
+  /**
+   * Set the pinned event IDs for a room (overwrites the full list).
+   * Requires the user to have sufficient power level to send state events.
+   * Returns false if the server rejects it (e.g. M_FORBIDDEN — insufficient power level).
+   * @returns {boolean} true on success, false on permission error
+   */
+  async setPinnedEvents(roomId, pinnedIds) {
+    const rid = encodeURIComponent(roomId);
+    try {
+      await this._request(
+        'PUT',
+        `/_matrix/client/v3/rooms/${rid}/state/m.room.pinned_events/`,
+        { pinned: pinnedIds }
+      );
+      return true;
+    } catch (err) {
+      if (err.message && err.message.includes('Matrix 403')) return false; // insufficient power level
+      throw err;
+    }
+  }
 }
 
 module.exports = { MatrixClient };

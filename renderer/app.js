@@ -75,6 +75,11 @@ function pinMessage(event) {
   // Highlight the message bubble
   const bubble = document.querySelector(`[data-event-id="${event.event_id}"]`);
   if (bubble) bubble.classList.add('pinned-highlight');
+  // Push to Matrix so Element sees it (fails silently if insufficient power level)
+  if (activeRoomId) {
+    const pinnedIds = pins.map(p => p.event_id);
+    window.bracerChat.setPinnedEvents(activeRoomId, pinnedIds).catch(() => {});
+  }
 }
 
 function unpinMessage(eventId) {
@@ -83,6 +88,40 @@ function unpinMessage(eventId) {
   renderPinnedPanel();
   const bubble = document.querySelector(`[data-event-id="${eventId}"]`);
   if (bubble) bubble.classList.remove('pinned-highlight');
+  // Push updated list to Matrix
+  if (activeRoomId) {
+    const pinnedIds = pins.map(p => p.event_id);
+    window.bracerChat.setPinnedEvents(activeRoomId, pinnedIds).catch(() => {});
+  }
+}
+
+/**
+ * Fetch m.room.pinned_events from Matrix and merge into local pin storage.
+ * Pins set in Element will appear in Bracer Chat after restart or on first load.
+ */
+async function syncPinsFromMatrix(roomId) {
+  try {
+    const matrixPinIds = await window.bracerChat.getPinnedEvents(roomId);
+    if (!matrixPinIds.length) return;
+    const localPins = loadPinned();
+    const localIds  = new Set(localPins.map(p => p.event_id));
+    let changed = false;
+    for (const id of matrixPinIds) {
+      if (!localIds.has(id)) {
+        // We don't have the full event here — add a placeholder that loadHistory will fill in
+        localPins.push({ event_id: id, sender: '', body: '[pinned]', ts: 0, pinnedAt: Date.now() });
+        changed = true;
+      }
+    }
+    // Remove local pins that were unpinned in Matrix
+    const matrixIdSet = new Set(matrixPinIds);
+    const merged = localPins.filter(p => matrixIdSet.has(p.event_id));
+    if (changed || merged.length !== localPins.length) {
+      savePinned(merged);
+    }
+  } catch (err) {
+    console.warn('[pins] syncPinsFromMatrix failed:', err.message);
+  }
 }
 
 function renderPinnedPanel() {
@@ -184,6 +223,9 @@ async function init() {
     elConnStatus.textContent = 'Loading history…';
     console.log('[app] sessionInfo:', JSON.stringify(sessionInfo));
 
+    // Load pins from Matrix state (syncs any pins set in Element)
+    await syncPinsFromMatrix(activeRoomId);
+
     renderPinnedPanel();
     await loadHistory();
 
@@ -264,7 +306,33 @@ function renderMessage(event, prepend = false) {
 
   switch (content.msgtype) {
     case 'm.text': {
-      linkify(bodyEl, content.body || '');
+      const replyTo = content['m.relates_to']?.['m.in_reply_to'];
+      if (replyTo) {
+        // Matrix reply bodies contain a fallback quote block before \n\n:
+        // "> <@sender:server> Original text\n\nActual reply here"
+        const fullBody   = content.body || '';
+        const splitIdx   = fullBody.indexOf('\n\n');
+        const quotedRaw  = splitIdx !== -1 ? fullBody.slice(0, splitIdx) : '';
+        const replyText  = splitIdx !== -1 ? fullBody.slice(splitIdx + 2) : fullBody;
+
+        // Build a small quoted block — strip "> " prefix, drop the "<@sender>" line
+        if (quotedRaw) {
+          const quotedLines = quotedRaw.split('\n')
+            .map(l => l.replace(/^> /, ''))
+            .filter(l => !l.startsWith('<@'));
+          const quoteText = quotedLines.join('\n').trim();
+          if (quoteText) {
+            const quoteEl = document.createElement('div');
+            quoteEl.className   = 'reply-quote';
+            quoteEl.textContent = quoteText;
+            bodyEl.appendChild(quoteEl);
+          }
+        }
+
+        linkify(bodyEl, replyText);
+      } else {
+        linkify(bodyEl, content.body || '');
+      }
       break;
     }
 
@@ -1045,6 +1113,12 @@ elMsgInput.addEventListener('keydown', (e) => {
 });
 
 elMsgInput.addEventListener('input', autoResizeTextarea);
+
+// Right-click context menu on the compose textarea (Cut / Copy / Paste / Select All)
+elMsgInput.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  window.bracerChat.showInputContextMenu();
+});
 
 // Paste image from clipboard (e.g. Win+Shift+S snip, or copy image from browser)
 elMsgInput.addEventListener('paste', (e) => {
