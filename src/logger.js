@@ -2,18 +2,20 @@
 
 /**
  * logger.js
- * Writes timestamped log lines to C:\ProgramData\BracerChat\bracer-chat.log.
- * Rotates to bracer-chat.log.bak when the file exceeds MAX_SIZE.
+ * Writes WARN/ERROR/FATAL lines to C:\ProgramData\BracerChat\bracer-chat-error.log.
+ * Normal console.log (INFO) is NOT written to the file — only problems.
+ * Rotates to bracer-chat-error.log.bak when the file exceeds MAX_SIZE.
  *
  * Call setupLogging() once at the very start of main.js to:
- *   - Mirror console.log / warn / error to the log file
+ *   - Mirror console.warn / console.error to the log file
  *   - Catch uncaughtException and unhandledRejection
+ *   - Catch renderer/child process crashes
  */
 
 const fs = require('fs');
 
-const LOG_PATH = 'C:\\ProgramData\\BracerChat\\bracer-chat.log';
-const BAK_PATH = 'C:\\ProgramData\\BracerChat\\bracer-chat.log.bak';
+const LOG_PATH = 'C:\\ProgramData\\BracerChat\\bracer-chat-error.log';
+const BAK_PATH = 'C:\\ProgramData\\BracerChat\\bracer-chat-error.log.bak';
 const MAX_SIZE = 2 * 1024 * 1024; // 2 MB
 
 function timestamp() {
@@ -33,16 +35,13 @@ function formatArgs(args) {
 function writeLine(level, args) {
   const line = `${timestamp()} [${level}] ${formatArgs(args)}\n`;
   try {
-    // Rotate if over size limit
     try {
       const stat = fs.statSync(LOG_PATH);
-      if (stat.size > MAX_SIZE) {
-        fs.renameSync(LOG_PATH, BAK_PATH);
-      }
+      if (stat.size > MAX_SIZE) fs.renameSync(LOG_PATH, BAK_PATH);
     } catch (_) {}
     fs.appendFileSync(LOG_PATH, line, 'utf8');
   } catch (_) {
-    // Never throw from logger — swallow silently
+    // Never throw from logger
   }
 }
 
@@ -53,15 +52,10 @@ function setupLogging() {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   } catch (_) {}
 
-  // Mirror console methods to log file
-  const origLog   = console.log.bind(console);
+  // Only mirror console.warn and console.error — not console.log
   const origWarn  = console.warn.bind(console);
   const origError = console.error.bind(console);
 
-  console.log = (...args) => {
-    origLog(...args);
-    writeLine('INFO', args);
-  };
   console.warn = (...args) => {
     origWarn(...args);
     writeLine('WARN', args);
@@ -71,7 +65,7 @@ function setupLogging() {
     writeLine('ERROR', args);
   };
 
-  // Catch unhandled errors in the main process
+  // Catch unhandled crashes in the main process
   process.on('uncaughtException', (err) => {
     writeLine('FATAL', [`uncaughtException: ${err.stack || err.message}`]);
   });
@@ -83,6 +77,7 @@ function setupLogging() {
     writeLine('FATAL', [`unhandledRejection: ${msg}`]);
   });
 
+  // Write a start marker so we can see when the app launched
   writeLine('INFO', [`=== Bracer Chat v${require('../package.json').version} started ===`]);
 }
 
