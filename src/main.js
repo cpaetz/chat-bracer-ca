@@ -1,5 +1,9 @@
 'use strict';
 
+// Set up file logging before anything else so all console output and
+// uncaught errors are captured to C:\ProgramData\BracerChat\bracer-chat.log
+require('./logger').setupLogging();
+
 /**
  * main.js
  * Bracer Chat — Electron main process.
@@ -210,6 +214,15 @@ app.on('before-quit', () => {
 
 // Keep running in tray even when all windows are closed
 app.on('window-all-closed', () => {});
+
+// Log renderer crashes (GPU process gone, renderer killed, etc.)
+app.on('render-process-gone', (_event, _webContents, details) => {
+  console.error('[BracerChat] Renderer process gone — reason:', details.reason, '| exit code:', details.exitCode);
+});
+
+app.on('child-process-gone', (_event, details) => {
+  console.error('[BracerChat] Child process gone — type:', details.type, '| reason:', details.reason, '| exit code:', details.exitCode);
+});
 
 // ── First-launch info post ─────────────────────────────────────────────────
 
