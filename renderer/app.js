@@ -1120,25 +1120,32 @@ elMsgInput.addEventListener('contextmenu', (e) => {
   window.bracerChat.showInputContextMenu();
 });
 
-// Paste image from clipboard (e.g. Win+Shift+S snip, or copy image from browser)
-elMsgInput.addEventListener('paste', (e) => {
+// Helper: upload a base64 PNG string from the Electron clipboard API
+async function pasteClipboardImageB64(b64) {
+  const binary = atob(b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  await sendFileByPath({ name: `paste-${Date.now()}.png`, mimeType: 'image/png', data: bytes.buffer });
+}
+
+// Paste image from clipboard via Ctrl+V (e.g. Win+Shift+S snip, copy image from browser).
+// Uses Electron native clipboard API as primary source because clipboardData.getAsFile()
+// returns an empty blob for Windows DIB-format images (common with snipping tool).
+elMsgInput.addEventListener('paste', async (e) => {
   const items = Array.from(e.clipboardData?.items || []);
   const imageItem = items.find(i => i.type.startsWith('image/'));
   if (!imageItem) return; // no image — let normal text paste proceed
   e.preventDefault();
-  const file = imageItem.getAsFile();
-  if (!file) return;
-  const ext  = file.type === 'image/png' ? 'png'
-             : file.type === 'image/jpeg' ? 'jpg'
-             : file.type === 'image/gif'  ? 'gif'
-             : file.type === 'image/webp' ? 'webp'
-             : 'png';
-  const name = `paste-${Date.now()}.${ext}`;
-  const reader = new FileReader();
-  reader.onload = async () => {
-    await sendFileByPath({ name, mimeType: file.type, data: reader.result });
-  };
-  reader.readAsArrayBuffer(file);
+  // Use Electron main-process clipboard.readImage() — handles all Windows clipboard formats correctly
+  const b64 = await window.bracerChat.readClipboardImage();
+  if (b64) {
+    await pasteClipboardImageB64(b64);
+  }
+});
+
+// Paste image via right-click context menu → Paste (sent from main process)
+window.bracerChat.onPasteClipboardImage(async (b64) => {
+  await pasteClipboardImageB64(b64);
 });
 
 elBtnAttach.addEventListener('click', attachFile);

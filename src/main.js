@@ -417,16 +417,39 @@ ipcMain.handle('open-image-in-app', async (_event, mxcUri, fileName) => {
   await shell.openPath(tmpPath);
 });
 
-// Show a native Cut / Copy / Paste context menu for text inputs
+// Show a native Cut / Copy / Paste context menu for text inputs.
+// The Paste item checks the Electron clipboard directly so that image data
+// (Win+Shift+S snips, copied images) is sent as an m.image upload rather than
+// falling back to an empty / blank file that webContents.paste() would produce.
 ipcMain.on('show-input-context-menu', (event) => {
   const menu = Menu.buildFromTemplate([
     { role: 'cut' },
     { role: 'copy' },
-    { role: 'paste' },
+    {
+      label      : 'Paste',
+      accelerator: 'CmdOrCtrl+V',
+      click      : () => {
+        const img = clipboard.readImage();
+        if (!img.isEmpty()) {
+          // Send PNG buffer as base64 to renderer for upload
+          event.sender.send('paste-clipboard-image', img.toPNG().toString('base64'));
+        } else {
+          BrowserWindow.fromWebContents(event.sender).webContents.paste();
+        }
+      }
+    },
     { type: 'separator' },
     { role: 'selectAll' }
   ]);
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
+});
+
+// Read clipboard image via Electron native API — used as a fallback in the renderer
+// paste handler when clipboardData.items returns an empty file (Windows DIB format).
+ipcMain.handle('read-clipboard-image', () => {
+  const img = clipboard.readImage();
+  if (img.isEmpty()) return null;
+  return img.toPNG().toString('base64');
 });
 
 // Pinned events — read from / write to Matrix m.room.pinned_events state

@@ -75,6 +75,14 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Show a native Cut/Copy/Paste context menu (for text inputs). */
   showInputContextMenu: () => ipcRenderer.send('show-input-context-menu'),
 
+  /** Read clipboard image via Electron native API. Returns base64 PNG string or null. */
+  readClipboardImage: () => ipcRenderer.invoke('read-clipboard-image'),
+
+  /** Called when the context menu Paste triggers an image paste. Receives base64 PNG string. */
+  onPasteClipboardImage: (callback) => {
+    ipcRenderer.on('paste-clipboard-image', (_event, b64) => callback(b64));
+  },
+
   /** Fetch pinned event IDs from Matrix m.room.pinned_events state. @returns {Promise<string[]>} */
   getPinnedEvents: (roomId) => ipcRenderer.invoke('get-pinned-events', roomId),
 
