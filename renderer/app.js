@@ -326,6 +326,10 @@ function renderMessage(event, prepend = false) {
   timeEl.textContent = formatTime(event.origin_server_ts);
   wrap.appendChild(timeEl);
 
+  // Pin button (hover to reveal; always visible when pinned)
+  const pinBtn = makePinBtn(event);
+  if (pinBtn) wrap.appendChild(pinBtn);
+
   // Copy button
   wrap.appendChild(makeCopyBtn(event, undefined, imgElForCopy));
 
@@ -470,6 +474,32 @@ async function handleIncomingMessage({ roomId, event }) {
   scrollToBottom();
 }
 
+function makePinBtn(event) {
+  if (!event.event_id) return null;
+  const btn = document.createElement('button');
+  btn.className = 'pin-btn';
+
+  function updateState() {
+    const pinned = isPinned(event.event_id);
+    btn.textContent = '📌';
+    btn.title       = pinned ? 'Unpin message' : 'Pin message';
+    btn.classList.toggle('pinned', pinned);
+  }
+  updateState();
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (isPinned(event.event_id)) {
+      unpinMessage(event.event_id);
+    } else {
+      pinMessage(event);
+    }
+    updateState();
+  });
+
+  return btn;
+}
+
 function makeCopyBtn(event, textOverride, imgEl) {
   const btn = document.createElement('button');
   btn.className   = 'copy-btn';
@@ -541,6 +571,8 @@ function renderBroadcast(event, label) {
 
   box.appendChild(bodyEl);
   box.appendChild(timeEl);
+  const broadcastPinBtn = makePinBtn(event);
+  if (broadcastPinBtn) box.appendChild(broadcastPinBtn);
   box.appendChild(makeCopyBtn(event, bodyText));
   wrap.appendChild(labelEl);
   wrap.appendChild(box);
@@ -631,6 +663,8 @@ function hideScreenPicker() {
 
 // Renders the screen picker with displays laid out proportionally to match
 // their physical arrangement in Windows display settings.
+// Each display element stores its sourceId as ._sourceId so thumbnails can
+// be patched in later without rebuilding the whole picker.
 function showScreenPicker(screens, onSelect) {
   elScreenPickerMap.innerHTML = '';
 
@@ -650,9 +684,11 @@ function showScreenPicker(screens, onSelect) {
 
   elScreenPickerMap.style.height = mapH + 'px';
 
-  screens.forEach(s => {
+  screens.forEach((s, i) => {
     const el = document.createElement('div');
-    el.className = 'screen-picker-display';
+    el.className    = 'screen-picker-display';
+    el._sourceId    = s.id;   // updated later when thumbnails arrive
+    el.dataset.idx  = i;
 
     // Position and size proportionally.
     el.style.left   = Math.round((s.bounds.x - minX) * scale) + 'px';
@@ -660,7 +696,7 @@ function showScreenPicker(screens, onSelect) {
     el.style.width  = Math.round(s.bounds.width  * scale) + 'px';
     el.style.height = Math.round(s.bounds.height * scale) + 'px';
 
-    // Thumbnail preview.
+    // Thumbnail preview (may be null on first render — patched in async).
     if (s.thumbnail) {
       const img = document.createElement('img');
       img.src = s.thumbnail;
@@ -674,15 +710,35 @@ function showScreenPicker(screens, onSelect) {
     label.textContent = s.label;
     el.appendChild(label);
 
+    // Click handler reads ._sourceId at click time so async updates work.
     el.addEventListener('click', () => {
       hideScreenPicker();
-      onSelect(s.id);
+      onSelect(el._sourceId);
     });
 
     elScreenPickerMap.appendChild(el);
   });
 
   elScreenPicker.classList.add('visible');
+}
+
+// Patches thumbnails and sourceIds into an already-visible picker.
+function updateScreenPickerThumbnails(screens) {
+  const els = elScreenPickerMap.querySelectorAll('.screen-picker-display');
+  screens.forEach((s, i) => {
+    const el = els[i];
+    if (!el) return;
+    el._sourceId = s.id; // update sourceId for click handler
+    if (s.thumbnail) {
+      let img = el.querySelector('img');
+      if (!img) {
+        img = document.createElement('img');
+        img.alt = s.label;
+        el.insertBefore(img, el.querySelector('.screen-picker-label'));
+      }
+      img.src = s.thumbnail;
+    }
+  });
 }
 
 // ── Send screenshot ────────────────────────────────────────────────────────
@@ -711,14 +767,30 @@ async function captureAndSend(sourceId) {
 }
 
 async function sendScreenshot() {
-  // If only one screen is connected, skip the picker and capture immediately.
-  const screens = await window.bracerChat.getScreens();
-  if (screens.length <= 1) {
-    await captureAndSend(screens[0]?.id ?? null);
+  // Get layout instantly (no thumbnail capture) so the picker appears immediately.
+  const layout = await window.bracerChat.getScreenLayout();
+
+  if (layout.length <= 1) {
+    // Single screen — skip picker, go straight to capture.
+    await captureAndSend(null);
     return;
   }
-  // Multiple screens — show picker; capture happens in the onSelect callback.
-  showScreenPicker(screens, (sourceId) => captureAndSend(sourceId));
+
+  // Show picker right away with placeholder boxes (no thumbnails yet).
+  showScreenPicker(layout, (sourceId) => captureAndSend(sourceId));
+
+  // Give the user 200ms to cancel before starting thumbnail capture.
+  // If cancelled in that window, skip the heavy getSources() call entirely
+  // so the main process stays free and the app feels responsive.
+  await new Promise(r => setTimeout(r, 200));
+  if (!elScreenPicker.classList.contains('visible')) return;
+
+  // Load thumbnails in the background and patch them in if picker is still open.
+  window.bracerChat.getScreens().then(screens => {
+    if (elScreenPicker.classList.contains('visible')) {
+      updateScreenPickerThumbnails(screens);
+    }
+  }).catch(() => {});
 }
 
 // ── Open Ticket ────────────────────────────────────────────────────────────

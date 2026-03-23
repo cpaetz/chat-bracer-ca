@@ -287,6 +287,18 @@ ipcMain.handle('send-file', async (_event, roomId, fileData, fileName, mimeType)
   return { mxcUri, fileName, mimeType: resolvedMime };
 });
 
+// Returns display layout instantly (no capture) — used to show the picker immediately.
+ipcMain.handle('get-screen-layout', () => {
+  const displays = screen.getAllDisplays();
+  const primaryId = screen.getPrimaryDisplay().id;
+  return displays.map((display, i) => ({
+    id        : null, // sourceId filled in later by get-screens
+    label     : `Display ${i + 1}${display.id === primaryId ? ' (Primary)' : ''}`,
+    bounds    : display.bounds,
+    thumbnail : null
+  }));
+});
+
 // Returns all connected displays with positional bounds and small thumbnails for the picker UI.
 ipcMain.handle('get-screens', async () => {
   const displays = screen.getAllDisplays();

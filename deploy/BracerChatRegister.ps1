@@ -19,7 +19,7 @@
         $BracerChatApiSecret - shared API secret (masked policy variable)
 
 .NOTES
-    Version:        1.1
+    Version:        1.7
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
     Updated:        2026-03-22
@@ -32,10 +32,10 @@
 # Constants
 # ---------------------------------------------------------------------------
 $SessionDatPath  = 'C:\ProgramData\BracerChat\session.dat'
-$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.1.exe'
+$InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-1.0.2.exe'
 $InstallerPath   = 'C:\BracerTools\Temp\BracerChatSetup.exe'
 $RegistrationUrl = 'https://chat.bracer.ca/api/register'
-$ExpectedVersion = '1.0.1'
+$ExpectedVersion = '1.0.2'
 # Basic Auth for /install/* (bracer-install account — hardcoded per design)
 $InstallerAuthHeader = 'Basic YnJhY2VyLWluc3RhbGw6S3g3ZkdKRGdCbVpicWxvNDZWN0tOVGdTOXZZ'
 
@@ -96,18 +96,32 @@ function Set-BracerChatAcl {
     }
     Log-Message "Applying ACL hardening to ${Dir}."
     try {
-        $IcaclsArgs = @(
-            $Dir,
-            '/inheritance:r',
-            '/grant', 'BUILTIN\Administrators:(OI)(CI)F',
-            '/grant', 'NT AUTHORITY\SYSTEM:(OI)(CI)F',
-            '/grant', 'BUILTIN\Users:(OI)(CI)R',
-            '/T', '/Q'
-        )
-        $Proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $IcaclsArgs `
-                    -Wait -PassThru -NoNewWindow -ErrorAction Stop
-        if ($Proc.ExitCode -ne 0) {
-            Log-Message "icacls exited with code $($Proc.ExitCode)." -Level 'WARNING'
+        # Take ownership first so SYSTEM can reset ACLs on files written by
+        # other accounts (e.g. debug.log written by the logged-in user).
+        & takeown.exe /F $Dir /R /D Y 2>&1 | Out-Null
+
+        # Reset — restores inherited permissions and clears any broken ACL
+        # state left by a previous failed run, then apply desired grants.
+        # Call icacls directly — avoids Start-Process splitting "NT AUTHORITY\SYSTEM" on the space.
+        & icacls.exe $Dir /reset /T /Q | Out-Null
+
+        # Pass 1: set the directory itself with (OI)(CI) so new files inherit correctly.
+        & icacls.exe $Dir /inheritance:r `
+            /grant 'BUILTIN\Administrators:(OI)(CI)F' `
+            /grant 'NT AUTHORITY\SYSTEM:(OI)(CI)F' `
+            /grant 'BUILTIN\Users:(OI)(CI)R' `
+            /Q | Out-Null
+
+        # Pass 2: explicitly fix existing files — icacls (OI)(CI) on files creates inherit-only
+        # ACEs that do not grant access to the file itself, so files need a separate direct grant.
+        & icacls.exe "$Dir\*" /inheritance:r `
+            /grant 'BUILTIN\Administrators:F' `
+            /grant 'NT AUTHORITY\SYSTEM:F' `
+            /grant 'BUILTIN\Users:R' `
+            /T /Q | Out-Null
+
+        if ($LASTEXITCODE -ne 0) {
+            Log-Message "icacls exited with code ${LASTEXITCODE}." -Level 'WARNING'
         } else {
             Log-Message "ACL applied successfully to ${Dir}."
         }
@@ -191,8 +205,15 @@ function Invoke-BracerChatDeploy {
     Add-Type -AssemblyName System.Security
 
     # ------------------------------------------------------------------
+    # ACL heal-first — run before any file I/O so a broken ACL from a
+    # previous failed run never blocks reading or writing session.dat.
+    # ------------------------------------------------------------------
+    Set-BracerChatAcl
+
+    # ------------------------------------------------------------------
     # Idempotency check - skip registration if valid session.dat exists
     # ------------------------------------------------------------------
+    $SkipRegistration = $false
     if (Test-Path -Path $SessionDatPath) {
         Log-Message "session.dat found - checking for valid access_token."
         try {
@@ -203,14 +224,21 @@ function Invoke-BracerChatDeploy {
             $Existing  = [System.Text.Encoding]::UTF8.GetString($DecBytes) | ConvertFrom-Json
             if (-not [string]::IsNullOrEmpty($Existing.access_token)) {
                 Log-Message "Valid session.dat found. Skipping registration."
-                Set-BracerChatAcl
-                Install-BracerChatIfNeeded
-                return
+                $SkipRegistration = $true
+            } else {
+                Log-Message "session.dat found but access_token is empty. Re-registering." -Level 'WARNING'
             }
-            Log-Message "session.dat found but access_token is empty. Re-registering." -Level 'WARNING'
         } catch {
             Log-Message "session.dat could not be decrypted or parsed: $($_.Exception.Message). Re-registering." -Level 'WARNING'
         }
+    }
+
+    # Install runs outside the session.dat try/catch so installer errors
+    # are not misidentified as session.dat parse failures.
+    # ACL is already hardened at the top of this function.
+    if ($SkipRegistration) {
+        Install-BracerChatIfNeeded
+        return
     }
 
     # ------------------------------------------------------------------
@@ -301,6 +329,12 @@ function Invoke-BracerChatDeploy {
         $Encrypted = [System.Security.Cryptography.ProtectedData]::Protect(
             $JsonBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine
         )
+        # Delete before writing so the new file inherits a clean ACL from the directory.
+        # SYSTEM has Full Control on the directory (granted above), so deletion succeeds
+        # even if the old file's own ACL is still broken.
+        if (Test-Path -Path $SessionDatPath) {
+            Remove-Item -Path $SessionDatPath -Force -ErrorAction SilentlyContinue
+        }
         [System.IO.File]::WriteAllBytes($SessionDatPath, $Encrypted)
         Log-Message "session.dat written to ${SessionDatPath}."
     } catch {
@@ -309,9 +343,8 @@ function Invoke-BracerChatDeploy {
     }
 
     # ------------------------------------------------------------------
-    # ACL hardening and install/update
+    # Install/update (ACL already hardened at top of function)
     # ------------------------------------------------------------------
-    Set-BracerChatAcl
     Install-BracerChatIfNeeded
 }
 

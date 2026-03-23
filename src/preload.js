@@ -37,6 +37,9 @@ contextBridge.exposeInMainWorld('bracerChat', {
    */
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
 
+  /** Returns display layout instantly (no capture) — used to show the picker immediately. */
+  getScreenLayout: () => ipcRenderer.invoke('get-screen-layout'),
+
   /** Returns all connected displays with bounds and thumbnails for the screen picker. */
   getScreens: () => ipcRenderer.invoke('get-screens'),
 

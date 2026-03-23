@@ -466,6 +466,41 @@ mark.search-highlight.active {
   border-radius : 10px;
 }
 
+/* ── Pin button ──────────────────────────────────────────────────────────── */
+.pin-btn {
+  position     : absolute;
+  top          : 6px;
+  right        : 52px;
+  background   : rgba(255,255,255,0.85);
+  border       : 1px solid var(--color-border);
+  border-radius: 4px;
+  padding      : 1px 4px;
+  font-size    : 11px;
+  cursor       : pointer;
+  color        : var(--color-text-secondary);
+  opacity      : 0;
+  transition   : opacity 0.15s;
+  line-height  : 1.6;
+}
+
+.message:hover .pin-btn {
+  opacity: 1;
+}
+
+/* Always visible + highlighted when message is pinned */
+.pin-btn.pinned {
+  opacity      : 1;
+  border-color : var(--color-primary);
+  color        : var(--color-primary);
+  background   : rgba(255,255,255,0.95);
+}
+
+.pin-btn:hover {
+  background  : var(--color-surface);
+  color       : var(--color-primary);
+  border-color: var(--color-primary);
+}
+
 /* ── Copy button ─────────────────────────────────────────────────────────── */
 .message {
   position: relative;
@@ -503,12 +538,18 @@ mark.search-highlight.active {
   border-color: #2e7d32;
 }
 
-/* Broadcast copy button stays visible (no hover-to-show needed) */
+/* Broadcast copy button stays visible; pin reveals on hover */
 .broadcast-box {
   position: relative;
 }
 
 .broadcast-box .copy-btn {
+  opacity: 1;
+  background: rgba(255,255,255,0.9);
+}
+
+.broadcast-box .pin-btn {
+  right  : 52px;
   opacity: 1;
   background: rgba(255,255,255,0.9);
 }
