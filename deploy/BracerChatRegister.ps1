@@ -19,11 +19,11 @@
         $BracerChatApiSecret - shared API secret (masked policy variable)
 
 .NOTES
-    Version:        1.8
+    Version:        1.9
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
-    Updated:        2026-03-22
-    Purpose:        Bracer Chat - Phase 6 Deployment Script (install/update + ACL hardening)
+    Updated:        2026-03-23
+    Purpose:        Bracer Chat - Phase 6 Deployment Script (install/update + ACL hardening + auto-start)
 #>
 
 #Requires -Version 5.1
@@ -171,6 +171,61 @@ function Install-BracerChat {
 }
 
 # ---------------------------------------------------------------------------
+# Set HKLM Run key so Bracer Chat auto-starts for every user on login
+# ---------------------------------------------------------------------------
+function Set-BracerChatAutoStart {
+    $AppExe  = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
+    $RunKey  = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+    $ValName = 'BracerChat'
+    try {
+        Set-ItemProperty -Path $RunKey -Name $ValName -Value "`"${AppExe}`"" -Type String -Force -ErrorAction Stop
+        Log-Message "Auto-start registry key set (HKLM Run → ${AppExe})."
+    } catch {
+        Log-Message "Failed to set auto-start registry key: $($_.Exception.Message)" -Level 'WARNING'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Launch Bracer Chat as the currently logged-in user via a one-time scheduled task
+# ---------------------------------------------------------------------------
+function Start-BracerChatAsUser {
+    $AppExe = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
+    if (-not (Test-Path -Path $AppExe)) {
+        Log-Message "App not found at ${AppExe} — skipping post-install launch." -Level 'WARNING'
+        return
+    }
+
+    # Skip if already running
+    if (Get-Process -Name 'Bracer Chat' -ErrorAction SilentlyContinue) {
+        Log-Message "Bracer Chat already running — skipping post-install launch."
+        return
+    }
+
+    $WinUser = (Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if ([string]::IsNullOrEmpty($WinUser)) {
+        Log-Message "No user currently logged in — skipping post-install launch." -Level 'WARNING'
+        return
+    }
+
+    $TaskName = 'BracerChatPostInstallLaunch'
+    try {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+        $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`""
+        $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
+        $Settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+        $Principal = New-ScheduledTaskPrincipal -UserId $WinUser -RunLevel Limited
+
+        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
+            -Principal $Principal -Settings $Settings -Force | Out-Null
+
+        Log-Message "Scheduled post-install launch for ${WinUser} (task: ${TaskName})."
+    } catch {
+        Log-Message "Failed to schedule post-install launch: $($_.Exception.Message)" -Level 'WARNING'
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Install or update Bracer Chat based on installed version vs expected version
 # ---------------------------------------------------------------------------
 function Install-BracerChatIfNeeded {
@@ -189,7 +244,7 @@ function Install-BracerChatIfNeeded {
     $InstalledVer = Get-InstalledVersion
     if ($InstalledVer -eq $ExpectedVersion) {
         Log-Message "Bracer Chat ${ExpectedVersion} already installed and up to date. Skipping install."
-        return
+        return $false
     }
     if ($InstalledVer) {
         Log-Message "Bracer Chat ${InstalledVer} installed — updating to ${ExpectedVersion}."
@@ -197,6 +252,7 @@ function Install-BracerChatIfNeeded {
         Log-Message "Bracer Chat not installed — performing fresh install."
     }
     Install-BracerChat
+    return $true
 }
 
 # ---------------------------------------------------------------------------
@@ -249,7 +305,9 @@ function Invoke-BracerChatDeploy {
     # are not misidentified as session.dat parse failures.
     # ACL is already hardened at the top of this function.
     if ($SkipRegistration) {
-        Install-BracerChatIfNeeded
+        $Installed = Install-BracerChatIfNeeded
+        Set-BracerChatAutoStart
+        if ($Installed) { Start-BracerChatAsUser }
         return
     }
 
@@ -357,7 +415,9 @@ function Invoke-BracerChatDeploy {
     # ------------------------------------------------------------------
     # Install/update (ACL already hardened at top of function)
     # ------------------------------------------------------------------
-    Install-BracerChatIfNeeded
+    $Installed = Install-BracerChatIfNeeded
+    Set-BracerChatAutoStart
+    if ($Installed) { Start-BracerChatAsUser }
 }
 
 # ---------------------------------------------------------------------------

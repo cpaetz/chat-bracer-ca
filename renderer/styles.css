@@ -280,7 +280,7 @@ mark.search-highlight.active {
   display    : flex;
   align-items: center;
   gap        : 6px;
-  flex-wrap  : nowrap;
+  flex-wrap  : wrap;
 }
 
 .compose-btn {
