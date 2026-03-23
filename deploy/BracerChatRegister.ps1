@@ -190,7 +190,9 @@ function Set-BracerChatAutoStart {
 }
 
 # ---------------------------------------------------------------------------
-# Launch Bracer Chat as the currently logged-in user via a one-time scheduled task
+# Launch Bracer Chat as the currently logged-in user via a one-time scheduled task.
+# Uses schtasks.exe /it (interactive) which reliably runs in the user's desktop
+# session when created from SYSTEM context - more reliable than PS cmdlets alone.
 # ---------------------------------------------------------------------------
 function Start-BracerChatAsUser {
     $AppExe = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
@@ -213,24 +215,27 @@ function Start-BracerChatAsUser {
 
     $TaskName = 'BracerChatPostInstallLaunch'
     try {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        # Remove any leftover task from a previous run
+        & schtasks.exe /delete /tn $TaskName /f 2>&1 | Out-Null
 
-        $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`""
-        $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(30)
-        $Settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable
-        $Principal = New-ScheduledTaskPrincipal -UserId $WinUser -RunLevel Limited -LogonType Interactive
-
-        $RegTaskParams = @{
-            TaskName  = $TaskName
-            Action    = $Action
-            Trigger   = $Trigger
-            Principal = $Principal
-            Settings  = $Settings
-            Force     = $true
+        # Schedule 2 minutes from now as a fallback time.
+        # /it = interactive: runs in the user's active desktop session (not SYSTEM session).
+        # /ru = run as this user; no password needed when user is already logged in interactively.
+        # /rl limited = standard user privilege level.
+        $RunTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
+        $RunDate = (Get-Date).ToString('MM/dd/yyyy')
+        $TaskArgs = @('/create', '/tn', $TaskName, '/tr', "`"${AppExe}`"",
+                      '/sc', 'once', '/st', $RunTime, '/sd', $RunDate,
+                      '/ru', $WinUser, '/it', '/rl', 'limited', '/f')
+        $CreateOut = & schtasks.exe $TaskArgs 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Log-Message "schtasks /create failed (exit ${LASTEXITCODE}): ${CreateOut}" -Level 'WARNING'
+            return
         }
-        Register-ScheduledTask @RegTaskParams | Out-Null
 
-        Log-Message "Scheduled post-install launch for ${WinUser} (task: ${TaskName})."
+        # Trigger it immediately rather than waiting for the scheduled time
+        & schtasks.exe /run /tn $TaskName 2>&1 | Out-Null
+        Log-Message "Post-install launch triggered for ${WinUser} via interactive task."
     } catch {
         Log-Message "Failed to schedule post-install launch: $($_.Exception.Message)" -Level 'WARNING'
     }

@@ -1138,7 +1138,7 @@ elMsgInput.addEventListener('paste', (e) => {
   reader.onload = async () => {
     await sendFileByPath({ name, mimeType: file.type, data: reader.result });
   };
-  reader.readAsDataURL(file);
+  reader.readAsArrayBuffer(file);
 });
 
 elBtnAttach.addEventListener('click', attachFile);
