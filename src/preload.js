@@ -37,8 +37,11 @@ contextBridge.exposeInMainWorld('bracerChat', {
    */
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
 
-  /** Captures the primary screen and sends as m.image. @returns {Promise<void>} */
-  sendScreenshot: (roomId) => ipcRenderer.invoke('send-screenshot', roomId),
+  /** Returns all connected displays with bounds and thumbnails for the screen picker. */
+  getScreens: () => ipcRenderer.invoke('get-screens'),
+
+  /** Captures the selected screen (by sourceId) and sends as m.image. @returns {Promise<void>} */
+  sendScreenshot: (roomId, sourceId) => ipcRenderer.invoke('send-screenshot', roomId, sourceId),
 
   // ── Media ──────────────────────────────────────────────────────────────
   /** Convert mxc:// URI → https:// download URL. @returns {string|null} */

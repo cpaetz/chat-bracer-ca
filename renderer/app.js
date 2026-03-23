@@ -24,6 +24,9 @@ const elMsgInput    = document.getElementById('msg-input');
 const elBtnSend     = document.getElementById('btn-send');
 const elBtnAttach   = document.getElementById('btn-attach');
 const elBtnShot     = document.getElementById('btn-screenshot');
+const elScreenPicker       = document.getElementById('screen-picker');
+const elScreenPickerMap    = document.getElementById('screen-picker-map');
+const elScreenPickerCancel = document.getElementById('screen-picker-cancel');
 const elBtnTicket   = document.getElementById('btn-ticket');
 const elStatusBar   = document.getElementById('status-bar');
 const elDragOverlay = document.querySelector('.drag-overlay');
@@ -620,14 +623,75 @@ async function sendFileByPath({ name, mimeType, data }) {
   }
 }
 
+// ── Screen picker ──────────────────────────────────────────────────────────
+
+function hideScreenPicker() {
+  elScreenPicker.classList.remove('visible');
+}
+
+// Renders the screen picker with displays laid out proportionally to match
+// their physical arrangement in Windows display settings.
+function showScreenPicker(screens, onSelect) {
+  elScreenPickerMap.innerHTML = '';
+
+  // Compute bounding box of all displays in virtual screen coordinates.
+  const minX = Math.min(...screens.map(s => s.bounds.x));
+  const minY = Math.min(...screens.map(s => s.bounds.y));
+  const maxX = Math.max(...screens.map(s => s.bounds.x + s.bounds.width));
+  const maxY = Math.max(...screens.map(s => s.bounds.y + s.bounds.height));
+
+  const virtualW = maxX - minX;
+  const virtualH = maxY - minY;
+
+  // Scale to fit within the 266px wide map area (290px picker − 24px padding).
+  const mapW    = 266;
+  const scale   = mapW / virtualW;
+  const mapH    = Math.round(virtualH * scale);
+
+  elScreenPickerMap.style.height = mapH + 'px';
+
+  screens.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'screen-picker-display';
+
+    // Position and size proportionally.
+    el.style.left   = Math.round((s.bounds.x - minX) * scale) + 'px';
+    el.style.top    = Math.round((s.bounds.y - minY) * scale) + 'px';
+    el.style.width  = Math.round(s.bounds.width  * scale) + 'px';
+    el.style.height = Math.round(s.bounds.height * scale) + 'px';
+
+    // Thumbnail preview.
+    if (s.thumbnail) {
+      const img = document.createElement('img');
+      img.src = s.thumbnail;
+      img.alt = s.label;
+      el.appendChild(img);
+    }
+
+    // Label bar.
+    const label = document.createElement('div');
+    label.className   = 'screen-picker-label';
+    label.textContent = s.label;
+    el.appendChild(label);
+
+    el.addEventListener('click', () => {
+      hideScreenPicker();
+      onSelect(s.id);
+    });
+
+    elScreenPickerMap.appendChild(el);
+  });
+
+  elScreenPicker.classList.add('visible');
+}
+
 // ── Send screenshot ────────────────────────────────────────────────────────
 
-async function sendScreenshot() {
+async function captureAndSend(sourceId) {
   elBtnShot.disabled = true;
   showStatus('Capturing screenshot…');
-
   try {
-    const { mxcUri, fileName } = await window.bracerChat.sendScreenshot(activeRoomId);
+    const { mxcUri, fileName } = await window.bracerChat.sendScreenshot(activeRoomId, sourceId);
     hideStatus();
     // Optimistic render — show screenshot immediately without waiting for sync
     renderMessage({
@@ -644,6 +708,17 @@ async function sendScreenshot() {
   } finally {
     elBtnShot.disabled = false;
   }
+}
+
+async function sendScreenshot() {
+  // If only one screen is connected, skip the picker and capture immediately.
+  const screens = await window.bracerChat.getScreens();
+  if (screens.length <= 1) {
+    await captureAndSend(screens[0]?.id ?? null);
+    return;
+  }
+  // Multiple screens — show picker; capture happens in the onSelect callback.
+  showScreenPicker(screens, (sourceId) => captureAndSend(sourceId));
 }
 
 // ── Open Ticket ────────────────────────────────────────────────────────────
@@ -722,8 +797,24 @@ elCtxPin.addEventListener('click', () => {
   hideCtxMenu();
 });
 
-document.addEventListener('click',    hideCtxMenu);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideCtxMenu(); });
+document.addEventListener('click', (e) => {
+  hideCtxMenu();
+  // Close screen picker if clicking outside it
+  if (!elScreenPicker.contains(e.target) && e.target !== elBtnShot) {
+    hideScreenPicker();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideCtxMenu();
+    hideScreenPicker();
+  }
+});
+
+elScreenPickerCancel.addEventListener('click', (e) => {
+  e.stopPropagation();
+  hideScreenPicker();
+});
 
 // ── Pinned panel collapse/expand ───────────────────────────────────────────
 

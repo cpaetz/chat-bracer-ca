@@ -19,6 +19,7 @@ const {
   ipcMain,
   dialog,
   desktopCapturer,
+  screen,
   shell,
   clipboard,
   nativeImage
@@ -286,7 +287,26 @@ ipcMain.handle('send-file', async (_event, roomId, fileData, fileName, mimeType)
   return { mxcUri, fileName, mimeType: resolvedMime };
 });
 
-ipcMain.handle('send-screenshot', async (_event, roomId) => {
+// Returns all connected displays with positional bounds and small thumbnails for the picker UI.
+ipcMain.handle('get-screens', async () => {
+  const displays = screen.getAllDisplays();
+  const primaryId = screen.getPrimaryDisplay().id;
+
+  const sources = await desktopCapturer.getSources({
+    types         : ['screen'],
+    thumbnailSize : { width: 160, height: 90 }
+  });
+
+  // On Windows, desktopCapturer screen sources are ordered to match getAllDisplays().
+  return displays.map((display, i) => ({
+    id        : sources[i]?.id ?? null,
+    label     : `Display ${i + 1}${display.id === primaryId ? ' (Primary)' : ''}`,
+    bounds    : display.bounds,
+    thumbnail : sources[i]?.thumbnail.toDataURL() ?? null
+  }));
+});
+
+ipcMain.handle('send-screenshot', async (_event, roomId, sourceId) => {
   // Use WDA_EXCLUDEFROMCAPTURE to exclude this window from the DWM capture
   // pipeline — window stays visible to the user but is absent from the screenshot.
   const winRef = require('./window').getWindow();
@@ -304,7 +324,10 @@ ipcMain.handle('send-screenshot', async (_event, roomId) => {
     });
     if (!sources.length) throw new Error('No screen sources available');
 
-    const pngBuffer = sources[0].thumbnail.toPNG();
+    // Use the caller-selected sourceId; fall back to first source if not found.
+    const source = (sourceId && sources.find(s => s.id === sourceId)) || sources[0];
+
+    const pngBuffer = source.thumbnail.toPNG();
     const fileName  = `screenshot-${Date.now()}.png`;
     const mxcUri    = await matrixClient.sendImage(roomId, pngBuffer, fileName, 'image/png');
     return { mxcUri, fileName };
