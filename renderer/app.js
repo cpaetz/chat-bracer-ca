@@ -180,9 +180,27 @@ function renderPinnedPanel() {
     item.appendChild(body);
     item.appendChild(removeBtn);
 
-    // Click item → scroll to that message bubble
-    item.addEventListener('click', () => {
-      const bubble = document.querySelector(`[data-event-id="${pin.event_id}"]`);
+    // Click item → scroll to that message bubble.
+    // Use dataset iteration instead of CSS querySelector to avoid selector
+    // escaping issues with Matrix event IDs (start with $, may contain colons).
+    // If the message isn't loaded in current history, fetch and render it first.
+    item.addEventListener('click', async () => {
+      const findBubble = () => {
+        for (const el of elMessages.querySelectorAll('[data-event-id]')) {
+          if (el.dataset.eventId === pin.event_id) return el;
+        }
+        return null;
+      };
+      let bubble = findBubble();
+      if (!bubble) {
+        try {
+          const ev = await window.bracerChat.getRoomEvent(activeRoomId, pin.event_id);
+          if (ev) {
+            renderMessage(ev);
+            bubble = findBubble();
+          }
+        } catch (_) {}
+      }
       if (bubble) bubble.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
 
