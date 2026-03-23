@@ -83,6 +83,9 @@ contextBridge.exposeInMainWorld('bracerChat', {
     ipcRenderer.on('paste-clipboard-image', (_event, b64) => callback(b64));
   },
 
+  /** Fetch a single Matrix event by ID. @returns {Promise<object|null>} */
+  getRoomEvent: (roomId, eventId) => ipcRenderer.invoke('get-room-event', roomId, eventId),
+
   /** Fetch pinned event IDs from Matrix m.room.pinned_events state. @returns {Promise<string[]>} */
   getPinnedEvents: (roomId) => ipcRenderer.invoke('get-pinned-events', roomId),
 

@@ -189,6 +189,17 @@ class MatrixClient {
     return mxcUri;
   }
 
+  /** Fetch a single event by ID. Returns the event object or null if not found. */
+  async getEvent(roomId, eventId) {
+    try {
+      const rid = encodeURIComponent(roomId);
+      const eid = encodeURIComponent(eventId);
+      return await this._request('GET', `/_matrix/client/v3/rooms/${rid}/event/${eid}`);
+    } catch {
+      return null;
+    }
+  }
+
   /** Get the m.room.name state for a room. Returns the name string or null. */
   async getRoomName(roomId) {
     try {

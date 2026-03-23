@@ -107,9 +107,28 @@ async function syncPinsFromMatrix(roomId) {
     const localIds  = new Set(localPins.map(p => p.event_id));
     let changed = false;
     for (const id of matrixPinIds) {
-      if (!localIds.has(id)) {
-        // We don't have the full event here — add a placeholder that loadHistory will fill in
-        localPins.push({ event_id: id, sender: '', body: '[pinned]', ts: 0, pinnedAt: Date.now() });
+      const existing = localPins.find(p => p.event_id === id);
+      // Fetch if new OR if it was previously saved as a placeholder (no sender/body)
+      const isPlaceholder = existing && (!existing.sender || existing.body === '[pinned]');
+      if (!existing || isPlaceholder) {
+        let sender = '', body = '[pinned]', ts = 0;
+        try {
+          const ev = await window.bracerChat.getRoomEvent(roomId, id);
+          if (ev) {
+            sender = ev.sender || '';
+            ts     = ev.origin_server_ts || 0;
+            const c = ev.content || {};
+            body = c.body || (c.msgtype === 'm.image' ? '[image]' : '[attachment]');
+          }
+        } catch (_) {}
+        if (existing) {
+          // Update the placeholder in place
+          existing.sender = sender;
+          existing.body   = body;
+          existing.ts     = ts;
+        } else {
+          localPins.push({ event_id: id, sender, body, ts, pinnedAt: Date.now() });
+        }
         changed = true;
       }
     }
@@ -118,6 +137,7 @@ async function syncPinsFromMatrix(roomId) {
     const merged = localPins.filter(p => matrixIdSet.has(p.event_id));
     if (changed || merged.length !== localPins.length) {
       savePinned(merged);
+      renderPinnedPanel();
     }
   } catch (err) {
     console.warn('[pins] syncPinsFromMatrix failed:', err.message);

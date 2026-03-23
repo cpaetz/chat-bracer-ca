@@ -469,6 +469,11 @@ ipcMain.handle('read-clipboard-image', () => {
   return img.toPNG().toString('base64');
 });
 
+// Fetch a single Matrix event by ID (used to resolve pinned event details)
+ipcMain.handle('get-room-event', async (_event, roomId, eventId) => {
+  return matrixClient.getEvent(roomId, eventId);
+});
+
 // Pinned events — read from / write to Matrix m.room.pinned_events state
 ipcMain.handle('get-pinned-events', async (_event, roomId) => {
   return matrixClient.getPinnedEvents(roomId);
