@@ -125,9 +125,7 @@ function Remove-StaleTasks {
     $WatchdogName = 'Bracer Chat Watchdog'
     Unregister-ScheduledTask -TaskName $WatchdogName -Confirm:$false -ErrorAction SilentlyContinue
     $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--startup'
-    $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date)
-    $Trigger.Repetition.Interval          = 'PT5M'
-    $Trigger.Repetition.StopAtDurationEnd = $false
+    $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
     $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
     $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
     Register-ScheduledTask -TaskName $WatchdogName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
