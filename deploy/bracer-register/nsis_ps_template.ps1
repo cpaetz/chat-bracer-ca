@@ -59,26 +59,43 @@ try {
     [System.IO.File]::WriteAllBytes($sessionPath, $encrypted)
     Write-Log "session.dat written"
 
-    # 5. Download BracerChat installer
+    # 5. Stop existing BracerChat before installing (locked files cause silent partial installs)
+    Write-Log "Stopping existing BracerChat (if running)..."
+    Get-Process -Name "Bracer Chat" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
+    # 6. Download BracerChat installer
     Write-Log "Downloading BracerChat installer..."
     $installer = Join-Path $env:TEMP 'BracerChatSetup.exe'
     Invoke-WebRequest -Uri "${appUrl}?token=${token}" -OutFile $installer -UseBasicParsing
     $sizeMB = [math]::Round((Get-Item $installer).Length / 1MB, 1)
     Write-Log "Download complete ($sizeMB MB)"
 
-    # 6. Install silently
+    # 7. Install silently
     Write-Log "Installing BracerChat..."
     $proc = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru -NoNewWindow
     if ($proc.ExitCode -ne 0) { throw "Installer exited with code $($proc.ExitCode)" }
     Remove-Item $installer -Force -ErrorAction SilentlyContinue
     Write-Log "BracerChat installed"
 
-    # 7. Set HKLM Run key for auto-start on boot
+    # 8. Set HKLM Run key for auto-start on boot
     $exePath = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
     if (Test-Path $exePath) {
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
             -Name 'BracerChat' -Value "`"$exePath`"" -ErrorAction SilentlyContinue
         Write-Log "Auto-start registry key set"
+    }
+
+    # 9. Launch BracerChat immediately as the current user
+    if (Test-Path $exePath) {
+        Write-Log "Launching BracerChat..."
+        $action    = New-ScheduledTaskAction -Execute $exePath
+        $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)
+        $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName 'BracerChatLaunch' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'BracerChatLaunch'
+        Write-Log "Launch task scheduled"
     }
 
     Write-Log "Installation complete."

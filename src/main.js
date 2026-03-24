@@ -41,6 +41,8 @@ const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray }        = require('./tray');
 const { createWindow, showWindow, hideWindow, sendToRenderer } = require('./window');
 const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
+const { checkAndUpdate }                                      = require('./updater');
+const { startLogUploader }                                    = require('./logUploader');
 
 // ── Win32 screen-capture exclusion (WDA_EXCLUDEFROMCAPTURE) ───────────────
 // Set up once at module load — koffi registers types globally and throws on duplicates.
@@ -206,6 +208,15 @@ app.on('ready', async () => {
 
   // 7. Windows user polling ──────────────────────────────────────────────
   userPollInterval = setInterval(checkUserChange, 60_000);
+
+  // 8. Self-update check ─────────────────────────────────────────────────
+  // Runs in background after 30s — avoids interfering with startup sync.
+  // If a newer version is available, downloads installer and relaunches.
+  setTimeout(() => checkAndUpdate(session.access_token), 30_000);
+
+  // 9. Log uploader ──────────────────────────────────────────────────────
+  // Uploads error log on startup (if changed) and every hour thereafter.
+  startLogUploader(session.access_token);
 });
 
 app.on('before-quit', () => {
