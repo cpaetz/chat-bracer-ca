@@ -63,6 +63,11 @@
   </div>
 
   <div id="compose">
+    <div id="reply-bar">
+      <span class="reply-bar-arrow">↩</span>
+      <span id="reply-bar-label"></span>
+      <button id="reply-bar-cancel" title="Cancel reply (Esc)">×</button>
+    </div>
     <div id="compose-input-row">
       <textarea id="msg-input" placeholder="Type a message…" rows="1" aria-label="Message input"></textarea>
     </div>
@@ -71,6 +76,7 @@
       <button class="compose-btn" id="btn-attach"     title="Attach file"     aria-label="Attach file">Attach</button>
       <button class="compose-btn" id="btn-screenshot" title="Send screenshot" aria-label="Send screenshot">Screenshot</button>
       <button class="compose-btn" id="btn-export"     title="Export chat to HTML" aria-label="Export chat">Export</button>
+      <div class="compose-row-break"></div>
       <button class="compose-btn" id="btn-ticket" title="Open a support ticket" aria-label="Open Ticket">Ticket</button>
       <button id="btn-send" aria-label="Send message">Send</button>
     </div>

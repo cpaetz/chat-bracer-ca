@@ -82,14 +82,14 @@ try {
     $exePath = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
     if (Test-Path $exePath) {
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
-            -Name 'BracerChat' -Value "`"$exePath`"" -ErrorAction SilentlyContinue
+            -Name 'BracerChat' -Value "`"$exePath`" --startup" -ErrorAction SilentlyContinue
         Write-Log "Auto-start registry key set"
     }
 
     # 9. Launch BracerChat immediately as the current user
     if (Test-Path $exePath) {
         Write-Log "Launching BracerChat..."
-        $action    = New-ScheduledTaskAction -Execute $exePath
+        $action    = New-ScheduledTaskAction -Execute $exePath -Argument '--startup'
         $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)
         $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited

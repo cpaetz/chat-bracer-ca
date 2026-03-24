@@ -38,11 +38,36 @@ const elCtxMenu     = document.getElementById('ctx-menu');
 const elCtxPin      = document.getElementById('ctx-pin');
 const elSearchInput = document.getElementById('search-input');
 const elSearchClear = document.getElementById('search-clear');
+const elReplyBar         = document.getElementById('reply-bar');
+const elReplyBarLabel    = document.getElementById('reply-bar-label');
+const elReplyBarCancel   = document.getElementById('reply-bar-cancel');
 const elBtnEmoji         = document.getElementById('btn-emoji');
 const elEmojiPicker      = document.getElementById('emoji-picker');
 const elEmojiGrid        = document.getElementById('emoji-grid');
 const elEmojiRecentGrid  = document.getElementById('emoji-recent-grid');
 const elEmojiRecentSec   = document.getElementById('emoji-recent-section');
+
+// ── Reply state ────────────────────────────────────────────────────────────
+
+let replyToEvent = null;
+
+function setReply(event) {
+  replyToEvent = event;
+  const sender  = senderLabel(event.sender);
+  const body    = (event.content && event.content.body) ||
+    (event.content && event.content.msgtype === 'm.image' ? '[image]' : '[attachment]');
+  const preview = body.length > 80 ? body.slice(0, 80) + '…' : body;
+  elReplyBarLabel.textContent = `${sender}: ${preview}`;
+  elReplyBar.classList.add('visible');
+  elMsgInput.focus();
+}
+
+function clearReply() {
+  replyToEvent = null;
+  elReplyBar.classList.remove('visible');
+}
+
+elReplyBarCancel.addEventListener('click', clearReply);
 
 // ── Pinned messages (localStorage) ─────────────────────────────────────────
 
@@ -301,6 +326,60 @@ async function init() {
 
 // ── Message rendering ──────────────────────────────────────────────────────
 
+/** Strip the Matrix fallback quote block (everything before the first \n\n). */
+function extractReplyText(body) {
+  const i = body.indexOf('\n\n');
+  return i !== -1 ? body.slice(i + 2) : body;
+}
+
+/** Scroll to a message by event_id and briefly flash it. */
+function scrollToMessage(eventId) {
+  const el = elMessages.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('message-highlight');
+  setTimeout(() => el.classList.remove('message-highlight'), 1500);
+}
+
+/**
+ * Async: fetch the original event and repopulate the quote block with the
+ * sender's name plus the real content (text preview or image thumbnail).
+ */
+async function enrichQuoteBlock(quoteEl, eventId) {
+  let event;
+  try {
+    event = await window.bracerChat.getRoomEvent(activeRoomId, eventId);
+  } catch (e) { return; }
+  if (!event || !event.content) return;
+
+  const c      = event.content;
+  const sender = senderLabel(event.sender || '');
+
+  quoteEl.textContent = '';   // clear the placeholder
+
+  const senderEl = document.createElement('span');
+  senderEl.className   = 'reply-quote-sender';
+  senderEl.textContent = sender;
+  quoteEl.appendChild(senderEl);
+
+  if (c.msgtype === 'm.image' && c.url) {
+    // Show a small thumbnail of the original image
+    const img     = document.createElement('img');
+    img.className = 'reply-quote-img';
+    img.alt       = c.body || 'image';
+    quoteEl.appendChild(img);
+    window.bracerChat.resolveMediaUrl(c.url).then(url => { if (url) img.src = url; });
+  } else {
+    // Text or file — strip any nested reply fallback and truncate
+    const raw      = c.body || c.filename || '[attachment]';
+    const bodyText = extractReplyText(raw).trim();
+    const textEl   = document.createElement('span');
+    textEl.className   = 'reply-quote-text';
+    textEl.textContent = bodyText.length > 120 ? bodyText.slice(0, 120) + '…' : bodyText;
+    quoteEl.appendChild(textEl);
+  }
+}
+
 function formatTime(tsMs) {
   if (!tsMs) return '';
   return new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -346,27 +425,31 @@ function renderMessage(event, prepend = false) {
     case 'm.text': {
       const replyTo = content['m.relates_to']?.['m.in_reply_to'];
       if (replyTo) {
-        // Matrix reply bodies contain a fallback quote block before \n\n:
-        // "> <@sender:server> Original text\n\nActual reply here"
-        const fullBody   = content.body || '';
-        const splitIdx   = fullBody.indexOf('\n\n');
-        const quotedRaw  = splitIdx !== -1 ? fullBody.slice(0, splitIdx) : '';
-        const replyText  = splitIdx !== -1 ? fullBody.slice(splitIdx + 2) : fullBody;
+        const fullBody  = content.body || '';
+        const replyText = extractReplyText(fullBody);
 
-        // Build a small quoted block — strip "> " prefix, drop the "<@sender>" line
-        if (quotedRaw) {
-          const quotedLines = quotedRaw.split('\n')
-            .map(l => l.replace(/^> /, ''))
-            .filter(l => !l.startsWith('<@'));
-          const quoteText = quotedLines.join('\n').trim();
-          if (quoteText) {
-            const quoteEl = document.createElement('div');
-            quoteEl.className   = 'reply-quote';
-            quoteEl.textContent = quoteText;
-            bodyEl.appendChild(quoteEl);
-          }
-        }
+        // Build quote block immediately using the Matrix fallback body,
+        // then replace it with real content from the original event async.
+        const quoteEl = document.createElement('div');
+        quoteEl.className       = 'reply-quote';
+        quoteEl.dataset.replyTo = replyTo.event_id;
+        quoteEl.title           = 'Click to jump to original message';
+        quoteEl.style.cursor    = 'pointer';
+        quoteEl.addEventListener('click', () => scrollToMessage(replyTo.event_id));
 
+        // Immediate placeholder from fallback body
+        const splitIdx  = fullBody.indexOf('\n\n');
+        const quotedRaw = splitIdx !== -1 ? fullBody.slice(0, splitIdx) : '';
+        const fallback  = quotedRaw
+          .split('\n')
+          .map(l => l.replace(/^> /, '').replace(/^<[^>]+>\s*/, ''))
+          .join('\n').trim();
+        quoteEl.textContent = fallback || '…';
+
+        // Async: replace with sender name + real content / image thumbnail
+        enrichQuoteBlock(quoteEl, replyTo.event_id);
+
+        bodyEl.appendChild(quoteEl);
         linkify(bodyEl, replyText);
       } else {
         linkify(bodyEl, content.body || '');
@@ -431,6 +514,9 @@ function renderMessage(event, prepend = false) {
   timeEl.className   = 'time';
   timeEl.textContent = formatTime(event.origin_server_ts);
   wrap.appendChild(timeEl);
+
+  // Reply button (hover to reveal)
+  wrap.appendChild(makeReplyBtn(event));
 
   // Pin button (hover to reveal; always visible when pinned)
   const pinBtn = makePinBtn(event);
@@ -522,8 +608,15 @@ async function loadHistory() {
   scrollToBottom();
 }
 
-function scrollToBottom() {
-  elMessages.scrollTop = elMessages.scrollHeight;
+function isNearBottom() {
+  return elMessages.scrollHeight - elMessages.scrollTop - elMessages.clientHeight < 150;
+}
+
+/** Scroll to bottom only if the user hasn't scrolled up to read history. */
+function scrollToBottom(force = false) {
+  if (force || isNearBottom()) {
+    elMessages.scrollTop = elMessages.scrollHeight;
+  }
 }
 
 // ── Notification sound ─────────────────────────────────────────────────────
@@ -784,6 +877,18 @@ function makeCopyBtn(event, textOverride, imgEl) {
   return btn;
 }
 
+function makeReplyBtn(event) {
+  const btn = document.createElement('button');
+  btn.className   = 'reply-btn';
+  btn.textContent = '↩';
+  btn.title       = 'Reply to this message';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setReply(event);
+  });
+  return btn;
+}
+
 function renderBroadcast(event, label) {
   if (!event.content) return;
   // Deduplicate — same event can arrive via both history load and live sync
@@ -830,27 +935,46 @@ async function sendMessage() {
   const text = elMsgInput.value.trim();
   if (!text) return;
 
+  const replyTarget = replyToEvent; // capture before clearing
   elMsgInput.value = '';
   autoResizeTextarea();
+  clearReply();
   elBtnSend.disabled = true;
 
   try {
-    await window.bracerChat.sendMessage(activeRoomId, text);
-
-    // Optimistic render — show own message immediately without waiting for sync
-    const localEventId = `local-${Date.now()}`;
-    renderMessage({
-      type             : 'm.room.message',
-      sender           : sessionInfo.userId,
-      event_id         : localEventId,
-      content          : { msgtype: 'm.text', body: text },
-      origin_server_ts : Date.now()
-    });
-    scrollToBottom();
+    if (replyTarget) {
+      await window.bracerChat.sendReply(activeRoomId, text, replyTarget);
+      // Optimistic render — include reply relation so quote block shows immediately
+      const origBody   = (replyTarget.content && replyTarget.content.body) || '[attachment]';
+      const origSender = replyTarget.sender || '';
+      const fallback   = `> <${origSender}> ${origBody}\n\n${text}`;
+      renderMessage({
+        type             : 'm.room.message',
+        sender           : sessionInfo.userId,
+        event_id         : `local-${Date.now()}`,
+        content          : {
+          msgtype        : 'm.text',
+          body           : fallback,
+          'm.relates_to' : { 'm.in_reply_to': { event_id: replyTarget.event_id } }
+        },
+        origin_server_ts : Date.now()
+      });
+    } else {
+      await window.bracerChat.sendMessage(activeRoomId, text);
+      renderMessage({
+        type             : 'm.room.message',
+        sender           : sessionInfo.userId,
+        event_id         : `local-${Date.now()}`,
+        content          : { msgtype: 'm.text', body: text },
+        origin_server_ts : Date.now()
+      });
+    }
+    scrollToBottom(true); // own message — always scroll down
 
   } catch (err) {
     showStatus('Send failed: ' + err.message);
     elMsgInput.value = text;
+    if (replyTarget) setReply(replyTarget); // restore reply state on failure
   } finally {
     elBtnSend.disabled = false;
     elMsgInput.focus();
@@ -894,7 +1018,7 @@ async function sendFileByPath({ name, mimeType, data }) {
       content          : { msgtype, body: fileName, url: mxcUri },
       origin_server_ts : Date.now()
     });
-    scrollToBottom();
+    scrollToBottom(true); // own send — always scroll down
   } catch (err) {
     showStatus('Upload failed: ' + err.message);
   }
@@ -1002,7 +1126,7 @@ async function captureAndSend(sourceId) {
       content          : { msgtype: 'm.image', body: fileName, url: mxcUri },
       origin_server_ts : Date.now()
     });
-    scrollToBottom();
+    scrollToBottom(true); // own send — always scroll down
   } catch (err) {
     showStatus('Screenshot failed: ' + err.message, 0); // persistent
     console.error('[app] Screenshot error:', err);
@@ -1125,6 +1249,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     hideCtxMenu();
     hideScreenPicker();
+    clearReply();
   }
 });
 

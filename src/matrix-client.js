@@ -119,6 +119,28 @@ class MatrixClient {
     );
   }
 
+  /** Send a reply to a specific event. Includes Matrix fallback quote in body. */
+  async sendReply(roomId, text, replyToEvent) {
+    const rid        = encodeURIComponent(roomId);
+    const txnId      = this._nextTxnId();
+    const origSender = replyToEvent.sender || '';
+    const origBody   = (replyToEvent.content && replyToEvent.content.body) || '[attachment]';
+    // Matrix reply fallback format: "> <@sender:server> original text\n\nreply text"
+    const quotedLines = origBody.split('\n').map((l, i) =>
+      i === 0 ? `> <${origSender}> ${l}` : `> ${l}`
+    );
+    const fallbackBody = `${quotedLines.join('\n')}\n\n${text}`;
+    await this._request(
+      'PUT',
+      `/_matrix/client/v3/rooms/${rid}/send/m.room.message/${txnId}`,
+      {
+        msgtype       : 'm.text',
+        body          : fallbackBody,
+        'm.relates_to': { 'm.in_reply_to': { event_id: replyToEvent.event_id } }
+      }
+    );
+  }
+
   /** Send a plain-text message to a room. */
   async sendMessage(roomId, text) {
     const rid   = encodeURIComponent(roomId);

@@ -77,10 +77,96 @@ function downloadFile(url, accessToken, destPath) {
 // ── Main export ─────────────────────────────────────────────────────────────
 
 /**
+ * downloadAndInstall(accessToken)
+ * Downloads the latest installer then registers a one-shot scheduled task
+ * running as SYSTEM to perform the silent install + relaunch.
+ * Using SYSTEM ensures the NSIS perMachine installer never triggers a UAC
+ * prompt regardless of the privileges of the currently logged-in user.
+ */
+async function downloadAndInstall(accessToken) {
+  const tmpDir  = os.tmpdir();
+  const exePath = path.join(tmpDir, 'BracerChatUpdate.exe');
+  const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
+  const TASK    = 'BracerChatUpdate';
+
+  await downloadFile(DOWNLOAD_URL, accessToken, exePath);
+  console.log('[Updater] Download complete. Queuing install via SYSTEM task...');
+
+  // PowerShell script run as SYSTEM:
+  //   1. Wait for the user-session app to exit
+  //   2. Install silently (perMachine — no UAC needed from SYSTEM)
+  //   3. Wait for install to complete
+  //   4. Detect the logged-in user via WMI and create a one-shot interactive
+  //      scheduled task to relaunch the app in their session (with --startup
+  //      so the window stays hidden on auto-relaunch, same as boot behaviour)
+  //   5. Clean up installer + self + the SYSTEM update task
+  const exeEsc = exePath.replace(/'/g, "''");  // PS single-quote escape
+  const ps1Lines = [
+    'Start-Sleep -Seconds 4',
+    `Start-Process -FilePath '${exeEsc}' -ArgumentList '/S' -Wait -NoNewWindow -WindowStyle Hidden`,
+    'Start-Sleep -Seconds 60',
+    `$appExe = '${APP_EXE.replace(/'/g, "''")}'`,
+    '$u = (Get-WmiObject Win32_ComputerSystem).UserName',
+    'if ($u -and (Test-Path $appExe)) {',
+    '    $action    = New-ScheduledTaskAction -Execute $appExe -Argument \'--startup\'',
+    '    $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)',
+    '    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2)',
+    '    $principal = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited',
+    '    Register-ScheduledTask -TaskName \'BracerChatRelaunch\' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null',
+    '    Start-Sleep -Seconds 2',
+    '    Start-ScheduledTask -TaskName \'BracerChatRelaunch\'',
+    '    Start-Sleep -Seconds 5',
+    '    Unregister-ScheduledTask -TaskName \'BracerChatRelaunch\' -Confirm:$false -ErrorAction SilentlyContinue',
+    '}',
+    `Remove-Item -Force '${exeEsc}' -ErrorAction SilentlyContinue`,
+    `schtasks /delete /tn '${TASK}' /f 2>&1 | Out-Null`,
+    'Start-Sleep -Seconds 1',
+    'Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue',
+  ];
+
+  fs.writeFileSync(ps1Path, ps1Lines.join('\r\n'), 'utf8');
+
+  // Register a one-shot SYSTEM scheduled task to run the PS1 script,
+  // starting 5 seconds from now (gives the app time to quit cleanly).
+  const startTime = new Date(Date.now() + 5000);
+  const timeStr   = `${String(startTime.getHours()).padStart(2,'0')}:${String(startTime.getMinutes()).padStart(2,'0')}`;
+
+  // Delete any leftover task from a previous failed update
+  spawn('schtasks', ['/delete', '/tn', TASK, '/f'], { stdio: 'ignore', windowsHide: true });
+
+  spawn('schtasks', [
+    '/create',
+    '/tn', TASK,
+    '/tr', `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${ps1Path}"`,
+    '/sc', 'once',
+    '/st', timeStr,
+    '/ru', 'SYSTEM',
+    '/f'
+  ], {
+    stdio      : 'ignore',
+    windowsHide: true
+  }).on('close', (code) => {
+    if (code === 0) {
+      console.log('[Updater] SYSTEM install task registered. Quitting...');
+      setTimeout(() => app.quit(), 1500);
+    } else {
+      console.warn('[Updater] schtasks failed (code', code, '). Falling back to direct PowerShell spawn...');
+      spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path], {
+        detached    : true,
+        stdio       : 'ignore',
+        windowsHide : true
+      }).unref();
+      setTimeout(() => app.quit(), 1500);
+    }
+  });
+}
+
+/**
  * checkAndUpdate(accessToken)
- * Call once after app is ready. Runs asynchronously — does not block startup.
- * If an update is available: downloads installer, writes a batch script to
- * install + relaunch, spawns it detached, then quits the app.
+ * Called on startup with a random jitter delay of 30s–60min so machines don't
+ * all hit the update server simultaneously.
+ * If a newer version is available: downloads installer, writes batch script,
+ * spawns detached, then quits.
  */
 async function checkAndUpdate(accessToken) {
   try {
@@ -100,41 +186,7 @@ async function checkAndUpdate(accessToken) {
     }
 
     console.log(`[Updater] Update available: v${currentVersion} → v${latestVersion}. Downloading...`);
-
-    // 2. Download installer to temp
-    const tmpDir  = os.tmpdir();
-    const exePath = path.join(tmpDir, 'BracerChatUpdate.exe');
-    const batPath = path.join(tmpDir, 'BracerChatUpdate.bat');
-
-    await downloadFile(DOWNLOAD_URL, accessToken, exePath);
-    console.log('[Updater] Download complete. Queuing install...');
-
-    // 3. Write a batch script that:
-    //    - Waits for this process to exit
-    //    - Runs the installer silently
-    //    - Relaunches the app
-    //    - Deletes itself
-    const bat = [
-      '@echo off',
-      'timeout /t 4 /nobreak >nul',
-      `"${exePath}" /S`,
-      'timeout /t 60 /nobreak >nul',
-      `if exist "${APP_EXE}" start "" "${APP_EXE}"`,
-      `del /f /q "${exePath}"`,
-      'del "%~f0"'
-    ].join('\r\n');
-
-    fs.writeFileSync(batPath, bat, 'ascii');
-
-    // 4. Spawn batch detached (survives app exit), then quit
-    spawn('cmd.exe', ['/c', batPath], {
-      detached    : true,
-      stdio       : 'ignore',
-      windowsHide : true
-    }).unref();
-
-    console.log('[Updater] Install queued. Restarting...');
-    setTimeout(() => app.quit(), 1500);
+    await downloadAndInstall(accessToken);
 
   } catch (err) {
     console.warn('[Updater] Update check failed:', err.message);

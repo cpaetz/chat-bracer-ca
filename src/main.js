@@ -39,7 +39,7 @@ const { readSession }                    = require('./credentials');
 const { getMachineInfo, getWindowsUser, getWindowsUserAsync } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray }        = require('./tray');
-const { createWindow, showWindow, hideWindow, sendToRenderer } = require('./window');
+const { createWindow, showWindow, hideWindow, sendToRenderer, flashWindow } = require('./window');
 const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
 const { checkAndUpdate, manualCheckForUpdate }                = require('./updater');
 const { startLogUploader }                                    = require('./logUploader');
@@ -128,8 +128,14 @@ app.on('ready', async () => {
     }
   });
 
-  // In dev mode, show the window immediately for testing
-  if (!app.isPackaged) {
+  // Stop flashing once the user focuses the window
+  winInstance.on('focus', () => flashWindow(false));
+
+  // Show window on manual launch (double-click shortcut, run from Start Menu, etc.)
+  // --startup flag is passed by the HKLM Run key and the post-update relaunch task,
+  // so those start hidden in the tray. Any other launch shows the window immediately.
+  const isStartup = process.argv.includes('--startup');
+  if (!app.isPackaged || !isStartup) {
     showWindow(false);
   }
 
@@ -209,6 +215,7 @@ app.on('ready', async () => {
     if (roomId === session.room_id_machine || isBroadcast) {
       showWindow(true); // alwaysOnTop for 5 s
       sendToRenderer('focus-message', { eventId: event.event_id });
+      flashWindow(true); // Flash taskbar button until user focuses the window
     }
   });
 
@@ -228,9 +235,11 @@ app.on('ready', async () => {
   userPollInterval = setInterval(checkUserChange, 60_000);
 
   // 8. Self-update check ─────────────────────────────────────────────────
-  // Runs in background after 30s — avoids interfering with startup sync.
-  // If a newer version is available, downloads installer and relaunches.
-  setTimeout(() => checkAndUpdate(session.access_token), 30_000);
+  // Delay is randomised: 30s base + 0–60min jitter so machines don't all
+  // hit the update server simultaneously after a fleet restart.
+  const updateJitterMs = 30_000 + Math.floor(Math.random() * 60 * 60 * 1000);
+  console.log(`[Main] Update check scheduled in ${Math.round(updateJitterMs / 60000)} min`);
+  setTimeout(() => checkAndUpdate(session.access_token), updateJitterMs);
 
   // 9. Log uploader ──────────────────────────────────────────────────────
   // Uploads error log on startup (if changed) and every hour thereafter.
@@ -306,6 +315,10 @@ ipcMain.handle('get-room-history', async (_event, roomId, sinceTs) => {
 
 ipcMain.handle('send-message', async (_event, roomId, text) => {
   await matrixClient.sendMessage(roomId, text);
+});
+
+ipcMain.handle('send-reply', async (_event, roomId, text, replyToEvent) => {
+  await matrixClient.sendReply(roomId, text, replyToEvent);
 });
 
 ipcMain.handle('send-poll-response', async (_event, roomId, pollEventId, answerId) => {

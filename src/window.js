@@ -8,8 +8,8 @@
  *   then released after 3 s so the user can move it behind other windows.
  */
 
-const { BrowserWindow } = require('electron');
-const path              = require('path');
+const { BrowserWindow, screen } = require('electron');
+const path                      = require('path');
 
 let win = null;
 
@@ -21,13 +21,24 @@ let win = null;
  */
 function createWindow(preloadPath, htmlPath) {
   const iconPath = path.join(__dirname, '..', 'assets', 'icon.ico');
+
+  // Position: narrow panel on the right edge, full work-area height.
+  // workArea excludes the Windows taskbar so the window doesn't overlap it.
+  const { workArea } = screen.getPrimaryDisplay();
+  const WIN_WIDTH = 360;
+  const winX      = workArea.x + workArea.width - WIN_WIDTH;
+  const winY      = workArea.y;
+  const winH      = workArea.height;
+
   win = new BrowserWindow({
-    width       : 460,
-    height      : 640,
+    width       : WIN_WIDTH,
+    height      : winH,
+    x           : winX,
+    y           : winY,
     show        : false,
     frame       : true,
     resizable   : true,
-    skipTaskbar : true,   // No Windows taskbar entry
+    skipTaskbar : false,  // Show in taskbar so icon is always visible
     title       : 'Bracer Chat',
     icon        : iconPath,
     webPreferences: {
@@ -118,4 +129,12 @@ function sendToRenderer(channel, ...args) {
 
 function getWindow() { return win; }
 
-module.exports = { createWindow, showWindow, hideWindow, getWindow, sendToRenderer };
+/**
+ * Flash (or stop flashing) the taskbar button to signal unread messages.
+ * @param {boolean} flash  true = start flashing, false = stop
+ */
+function flashWindow(flash) {
+  if (win && !win.isDestroyed()) win.flashFrame(flash);
+}
+
+module.exports = { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow };

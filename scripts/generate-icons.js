@@ -79,9 +79,15 @@ function makePNG(width, height, r, g, b) {
 const assetsDir = path.join(__dirname, '..', 'assets');
 if (!fs.existsSync(assetsDir)) fs.mkdirSync(assetsDir, { recursive: true });
 
-// Bracer blue: #1565C0 (R=21, G=101, B=192)
-fs.writeFileSync(path.join(assetsDir, 'tray.png'),  makePNG(16,  16,  21, 101, 192));
-fs.writeFileSync(path.join(assetsDir, 'icon.png'),  makePNG(256, 256, 21, 101, 192));
-
-console.log('Placeholder icons written to assets/');
-console.log('Replace with real Bracer icons before production build.');
+// Only write placeholder PNGs if the real icon.ico is not already present.
+// If icon.ico exists (real Bracer icon), skip — don't overwrite with placeholders.
+const icoPath = path.join(assetsDir, 'icon.ico');
+if (!fs.existsSync(icoPath)) {
+  // Bracer blue: #1565C0 (R=21, G=101, B=192)
+  fs.writeFileSync(path.join(assetsDir, 'tray.png'),  makePNG(16,  16,  21, 101, 192));
+  fs.writeFileSync(path.join(assetsDir, 'icon.png'),  makePNG(256, 256, 21, 101, 192));
+  console.log('Placeholder icons written to assets/');
+  console.log('Replace with real Bracer icons before production build.');
+} else {
+  console.log('Real icon.ico found — skipping placeholder generation.');
+}

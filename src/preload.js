@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** @returns {Promise<void>} */
   sendMessage: (roomId, text) => ipcRenderer.invoke('send-message', roomId, text),
 
+  /** Send a reply to a specific Matrix event. @returns {Promise<void>} */
+  sendReply: (roomId, text, replyToEvent) => ipcRenderer.invoke('send-reply', roomId, text, replyToEvent),
+
   /**
    * @param {string}      roomId
    * @param {ArrayBuffer} fileData
