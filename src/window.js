@@ -71,9 +71,12 @@ function showWindow(alwaysOnTop = false, bounds = null) {
     win.setOpacity(0);
     win.show();
     if (win.isMinimized()) win.restore(); // Only restore if actually minimized — unconditional restore resets rcNormalPosition on Windows
-    // Apply bounds AFTER show() — Windows repositions the window during show,
-    // so any setBounds called before show() gets overridden.
-    if (bounds) win.setBounds(bounds);
+    // Apply bounds AFTER show(). Set immediately AND on the next event loop
+    // tick — Win32 window placement is async so a single call can lose the race.
+    if (bounds) {
+      win.setBounds(bounds);
+      setImmediate(() => { if (win && !win.isDestroyed()) win.setBounds(bounds); });
+    }
     win.focus();
 
     // Fade in over ~150 ms (10 steps x 15 ms)
