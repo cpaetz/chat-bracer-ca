@@ -162,20 +162,45 @@ async function downloadAndInstallAsar(accessToken) {
   const dstEsc    = ASAR_DST.replace(/'/g, "''");
   const appExeEsc = APP_EXE.replace(/'/g, "''");
 
+  const logEsc = 'C:\\ProgramData\\BracerChat\\bracer-update.log'.replace(/'/g, "''");
+
   const ps1Lines = [
-    // Wait for Electron to release the file handle after app.quit()
-    'Start-Sleep -Seconds 4',
+    `$log = '${logEsc}'`,
     `$src = '${srcEsc}'`,
     `$dst = '${dstEsc}'`,
     `$app = '${appExeEsc}'`,
-    // Retry loop in case the file handle takes a moment to release
+    `$ts  = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
+    `Add-Content -Path $log -Value "$ts [Updater] PS1 started. Waiting for Bracer Chat to exit..."`,
+    // Wait up to 30 s for the Electron process to fully exit and release app.asar
+    'for ($w = 0; $w -lt 30; $w++) {',
+    '    if (-not (Get-Process -Name "Bracer Chat" -ErrorAction SilentlyContinue)) { break }',
+    '    Start-Sleep -Seconds 1',
+    '}',
+    `$ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
+    `Add-Content -Path $log -Value "$ts [Updater] Process gone. Attempting copy..."`,
+    // Retry copy up to 10 times in case the file handle takes a moment to release
+    '$copied = $false',
     'for ($i = 0; $i -lt 10; $i++) {',
-    '    try { Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop; break }',
-    '    catch { Start-Sleep -Seconds 2 }',
+    '    try {',
+    '        Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop',
+    '        $copied = $true',
+    `        $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
+    `        Add-Content -Path $log -Value "$ts [Updater] Copy succeeded on attempt $($i+1)."`,
+    '        break',
+    '    } catch {',
+    `        $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
+    `        Add-Content -Path $log -Value "$ts [Updater] Copy attempt $($i+1) failed: $($_.Exception.Message)"`,
+    '        Start-Sleep -Seconds 2',
+    '    }',
     '}',
     'Remove-Item -Path $src -Force -ErrorAction SilentlyContinue',
+    'if (-not $copied) {',
+    `    $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
+    `    Add-Content -Path $log -Value "$ts [Updater] All copy attempts failed. Aborting relaunch."`,
+    '} else {',
     // Relaunch directly — PS1 already runs as the logged-in user, no schtasks needed
-    'if (Test-Path $app) { Start-Process -FilePath $app -ArgumentList \'--startup\' }',
+    '    if (Test-Path $app) { Start-Process -FilePath $app -ArgumentList \'--startup\' }',
+    '}',
     'Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue',
   ];
 

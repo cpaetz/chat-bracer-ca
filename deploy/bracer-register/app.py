@@ -315,6 +315,18 @@ async def _get_or_create_company_room(
         headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
         json={"max_lifetime": RETENTION_MS},
     )
+    # Force-join staff users so they can see and post in the room
+    for staff_user in STAFF_USERS:
+        join_resp = await client.post(
+            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{room_id}",
+            headers=admin_headers,
+            json={"user_id": staff_user},
+        )
+        if join_resp.status_code != 200:
+            logger.warning(f"Failed to join {staff_user} to {room_id}: {join_resp.text}")
+        else:
+            logger.info(f"Joined {staff_user} to company broadcast room {room_id}")
+
     logger.info(f"Created company broadcast room: {alias} -> {room_id}")
     return room_id
 
@@ -682,13 +694,48 @@ def _filter_log_lines(content: bytes) -> bytes:
 
 @app.get("/api/update/check")
 async def update_check():
-    """Return the current app version. Public — no auth required."""
+    """Return the current app version and update type. Public — no auth required.
+    update_type: 'asar' for code-only updates (~3 MB), 'installer' for Electron/native dep bumps (~92 MB).
+    """
     try:
         with open("/var/www/install/latest.txt") as f:
             version = f.read().strip()
     except FileNotFoundError:
         raise HTTPException(status_code=503, detail="Version info unavailable")
-    return {"version": version}
+    try:
+        with open("/var/www/install/latest-type.txt") as f:
+            update_type = f.read().strip()
+    except FileNotFoundError:
+        update_type = "installer"  # safe fallback
+    return {"version": version, "update_type": update_type}
+
+
+@app.get("/api/update/asar")
+async def update_asar(request: Request):
+    """Stream the latest app.asar (~3 MB). Requires a valid machine Matrix access token."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token    = auth[7:]
+    hostname = await _validate_machine_token(token)
+    if not hostname:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    asar_path = "/var/www/install/app-latest.asar"
+    if not os.path.exists(asar_path):
+        raise HTTPException(status_code=503, detail="ASAR not available")
+
+    def iterfile():
+        with open(asar_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    logger.info(f"ASAR update download: hostname={hostname}")
+    return StreamingResponse(
+        iterfile(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": 'attachment; filename="app.asar"'},
+    )
 
 
 @app.get("/api/update/download")
