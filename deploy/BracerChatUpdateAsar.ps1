@@ -119,26 +119,19 @@ function Remove-StaleTasks {
         Remove-Item $f -Force -ErrorAction SilentlyContinue
     }
 
-    # Fix the watchdog task if it exists with a 2-minute execution time limit.
+    # Always rebuild the watchdog task to ensure ExecutionTimeLimit is zero.
     # Previous versions created it with (New-TimeSpan -Minutes 2) which caused
     # Task Scheduler to kill the app 2 minutes after every launch.
     $WatchdogName = 'Bracer Chat Watchdog'
-    $existingWatchdog = Get-ScheduledTask -TaskName $WatchdogName -ErrorAction SilentlyContinue
-    if ($existingWatchdog) {
-        $limitTicks = $existingWatchdog.Settings.ExecutionTimeLimit
-        if ($limitTicks -and $limitTicks -ne 'PT0S' -and $limitTicks -ne '') {
-            Log-Message "Watchdog task has ExecutionTimeLimit=$limitTicks — rebuilding with no limit..."
-            Unregister-ScheduledTask -TaskName $WatchdogName -Confirm:$false -ErrorAction SilentlyContinue
-            $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--startup'
-            $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date)
-            $Trigger.Repetition.Interval          = 'PT5M'
-            $Trigger.Repetition.StopAtDurationEnd = $false
-            $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
-            $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
-            Register-ScheduledTask -TaskName $WatchdogName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
-            Log-Message "Watchdog task rebuilt with no execution time limit."
-        }
-    }
+    Unregister-ScheduledTask -TaskName $WatchdogName -Confirm:$false -ErrorAction SilentlyContinue
+    $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--startup'
+    $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date)
+    $Trigger.Repetition.Interval          = 'PT5M'
+    $Trigger.Repetition.StopAtDurationEnd = $false
+    $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+    $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+    Register-ScheduledTask -TaskName $WatchdogName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
+    Log-Message "Watchdog task rebuilt with no execution time limit."
 
     Log-Message "Stale tasks and temp files cleaned up."
 }
