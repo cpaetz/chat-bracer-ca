@@ -55,19 +55,26 @@ function createWindow(preloadPath, htmlPath) {
 function showWindow(alwaysOnTop = false) {
   if (!win || win.isDestroyed()) return;
 
-  win.setOpacity(0);
-  win.show();
-  win.restore(); // un-minimize if minimized
-  win.focus();
+  if (!win.isVisible()) {
+    // Window is hidden — fade in from transparent
+    win.setOpacity(0);
+    win.show();
+    win.restore();
+    win.focus();
 
-  // Fade in over ~150 ms (10 steps x 15 ms)
-  let opacity = 0;
-  const fadeIn = setInterval(() => {
-    if (!win || win.isDestroyed()) { clearInterval(fadeIn); return; }
-    opacity = Math.min(1, opacity + 0.1);
-    win.setOpacity(opacity);
-    if (opacity >= 1) clearInterval(fadeIn);
-  }, 15);
+    // Fade in over ~150 ms (10 steps x 15 ms)
+    let opacity = 0;
+    const fadeIn = setInterval(() => {
+      if (!win || win.isDestroyed()) { clearInterval(fadeIn); return; }
+      opacity = Math.min(1, opacity + 0.1);
+      win.setOpacity(opacity);
+      if (opacity >= 1) clearInterval(fadeIn);
+    }, 15);
+  } else {
+    // Window is already visible — just restore/focus, no opacity flash
+    win.restore();
+    win.focus();
+  }
 
   if (alwaysOnTop) {
     win.setAlwaysOnTop(true);
