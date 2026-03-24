@@ -633,3 +633,115 @@ async def installer_download(token: str):
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{exe_name}"'},
     )
+
+# ── Self-Update + Log Collection ────────────────────────────────────────────────
+
+from datetime import datetime, timedelta
+
+LOG_STORE_DIR = "/opt/bracer-logs"
+
+
+async def _validate_machine_token(access_token: str):
+    """Validate a machine Matrix access token. Returns hostname string or None."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{SYNAPSE_URL}/_matrix/client/v3/account/whoami",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code != 200:
+        return None
+    user_id = resp.json().get("user_id", "")
+    # Expected format: @hostname:chat.bracer.ca
+    if not user_id.startswith("@") or ":" not in user_id:
+        return None
+    hostname = user_id[1:].split(":")[0]
+    # Reject staff/bot accounts
+    if "." in hostname or hostname in ("bracerbot", "bracer-register"):
+        return None
+    return hostname
+
+
+def _filter_log_lines(content: bytes) -> bytes:
+    """Strip log lines older than 7 days. Keeps lines without a recognised timestamp."""
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    lines   = content.decode("utf-8", errors="replace").splitlines(keepends=True)
+    result  = []
+    include = True
+    for line in lines:
+        m = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+        if m:
+            try:
+                ts      = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                include = ts >= cutoff
+            except ValueError:
+                include = True
+        if include:
+            result.append(line)
+    return "".join(result).encode("utf-8")
+
+
+@app.get("/api/update/check")
+async def update_check():
+    """Return the current app version. Public — no auth required."""
+    try:
+        with open("/var/www/install/latest.txt") as f:
+            version = f.read().strip()
+    except FileNotFoundError:
+        raise HTTPException(status_code=503, detail="Version info unavailable")
+    return {"version": version}
+
+
+@app.get("/api/update/download")
+async def update_download(request: Request):
+    """Stream the latest installer EXE. Requires a valid machine Matrix access token."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token    = auth[7:]
+    hostname = await _validate_machine_token(token)
+    if not hostname:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    exe_path = os.path.realpath(INSTALL_EXE_PATH)
+    if not os.path.exists(exe_path):
+        raise HTTPException(status_code=503, detail="Installer not available")
+
+    exe_name = os.path.basename(exe_path)
+
+    def iterfile():
+        with open(exe_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    logger.info(f"Update download: hostname={hostname}")
+    return StreamingResponse(
+        iterfile(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{exe_name}"'},
+    )
+
+
+@app.post("/api/logs/upload")
+async def logs_upload(request: Request):
+    """Receive a machine error log. Requires a valid machine Matrix access token."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token    = auth[7:]
+    hostname = await _validate_machine_token(token)
+    if not hostname:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.body()
+    if len(body) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Log too large")
+
+    filtered = _filter_log_lines(body)
+
+    os.makedirs(LOG_STORE_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_STORE_DIR, f"{hostname}.log")
+    with open(log_path, "wb") as f:
+        f.write(filtered)
+
+    logger.info(f"Log uploaded: hostname={hostname} size={len(filtered)}")
+    return {"ok": True}
