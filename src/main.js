@@ -123,10 +123,16 @@ function getDefaultBounds() {
  */
 function showAndResetIfNeeded(alwaysOnTop = false) {
   const win = getWindow();
+  let bounds = null;
   if (win && !win.isDestroyed() && !win.isVisible()) {
-    if (!readWindowPrefs().pinned) win.setBounds(getDefaultBounds());
+    const prefs = readWindowPrefs();
+    if (prefs.pinned && prefs.bounds) {
+      bounds = prefs.bounds;
+    } else if (!prefs.pinned) {
+      bounds = getDefaultBounds();
+    }
   }
-  showWindow(alwaysOnTop);
+  showWindow(alwaysOnTop, bounds);
 }
 
 // ── Badge rendering ────────────────────────────────────────────────────────
@@ -230,12 +236,6 @@ app.on('ready', async () => {
     path.join(__dirname, '..', 'renderer', 'index.html')
   );
 
-  // Apply saved window position/size if the user has pinned the window
-  const winPrefs = readWindowPrefs();
-  if (winPrefs.pinned && winPrefs.bounds) {
-    winInstance.setBounds(winPrefs.bounds);
-  }
-
   // Second instance launched (e.g. user double-clicks desktop shortcut) → show window
   app.on('second-instance', () => {
     showAndResetIfNeeded(false);
@@ -246,6 +246,16 @@ app.on('ready', async () => {
     if (!isAppQuitting) {
       e.preventDefault();
       winInstance.hide();
+    }
+  });
+
+  // Whenever the window hides, persist the current bounds if pinned.
+  // This captures any resizing/moving done after the pin button was clicked.
+  winInstance.on('hide', () => {
+    const prefs = readWindowPrefs();
+    if (prefs.pinned) {
+      prefs.bounds = winInstance.getBounds();
+      saveWindowPrefs(prefs);
     }
   });
 
@@ -365,11 +375,17 @@ app.on('ready', async () => {
   userPollInterval = setInterval(checkUserChange, 60_000);
 
   // 8. Self-update check ─────────────────────────────────────────────────
-  // Delay is randomised: 30s base + 0–60min jitter so machines don't all
-  // hit the update server simultaneously after a fleet restart.
+  // First check: 30s base + 0–60min jitter so machines don't all hit the
+  // update server simultaneously after a fleet restart.
+  // Recurring check: every 4 hours so long-running machines get updates
+  // without needing a restart.
+  const UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
   const updateJitterMs = 30_000 + Math.floor(Math.random() * 60 * 60 * 1000);
-  console.log(`[Main] Update check scheduled in ${Math.round(updateJitterMs / 60000)} min`);
-  setTimeout(() => checkAndUpdate(session.access_token), updateJitterMs);
+  console.log(`[Main] Update check scheduled in ${Math.round(updateJitterMs / 60000)} min, then every 4 h`);
+  setTimeout(() => {
+    checkAndUpdate(session.access_token);
+    setInterval(() => checkAndUpdate(session.access_token), UPDATE_INTERVAL_MS);
+  }, updateJitterMs);
 
   // 9. Log uploader ──────────────────────────────────────────────────────
   // Uploads error log on startup (if changed) and every hour thereafter.

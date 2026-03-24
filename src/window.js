@@ -63,14 +63,17 @@ function createWindow(preloadPath, htmlPath) {
  * for a skipTaskbar window that has no taskbar button to animate toward).
  * @param {boolean} alwaysOnTop  If true, window pops above everything for 5 s.
  */
-function showWindow(alwaysOnTop = false) {
+function showWindow(alwaysOnTop = false, bounds = null) {
   if (!win || win.isDestroyed()) return;
 
   if (!win.isVisible()) {
     // Window is hidden — fade in from transparent
     win.setOpacity(0);
     win.show();
-    win.restore();
+    if (win.isMinimized()) win.restore(); // Only restore if actually minimized — unconditional restore resets rcNormalPosition on Windows
+    // Apply bounds AFTER show() — Windows repositions the window during show,
+    // so any setBounds called before show() gets overridden.
+    if (bounds) win.setBounds(bounds);
     win.focus();
 
     // Fade in over ~150 ms (10 steps x 15 ms)

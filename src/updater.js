@@ -2,12 +2,17 @@
 
 /**
  * updater.js
- * Checks for a newer version of Bracer Chat on startup.
- * If a newer version is available, downloads the installer silently and
- * queues a batch script to install + relaunch after the app quits.
+ * Checks for a newer version of Bracer Chat on startup and every 4 hours.
+ * Supports two update types returned by the version check endpoint:
+ *
+ *   "asar"      — downloads only app.asar (~3 MB) and replaces it in-place.
+ *                 Used for all normal code/UI changes. No UAC, no full install.
+ *
+ *   "installer" — downloads the full NSIS installer (~92 MB) and runs it as
+ *                 SYSTEM. Used only when the Electron binary or native deps
+ *                 (koffi) change version.
  *
  * Auth: uses the machine's Matrix access_token from session.dat.
- * No credentials stored separately — if the machine is registered, it can update.
  */
 
 const https  = require('https');
@@ -19,7 +24,9 @@ const { app, dialog } = require('electron');
 
 const CHECK_URL    = 'https://chat.bracer.ca/api/update/check';
 const DOWNLOAD_URL = 'https://chat.bracer.ca/api/update/download';
+const ASAR_URL     = 'https://chat.bracer.ca/api/update/asar';
 const APP_EXE      = 'C:\\Program Files\\Bracer Chat\\Bracer Chat.exe';
+const ASAR_DST     = 'C:\\Program Files\\Bracer Chat\\resources\\app.asar';
 
 // ── Version comparison ──────────────────────────────────────────────────────
 
@@ -74,50 +81,135 @@ function downloadFile(url, accessToken, destPath) {
   });
 }
 
-// ── Main export ─────────────────────────────────────────────────────────────
+// ── Shared relaunch PS1 block ───────────────────────────────────────────────
+// Used by both update paths. Registers a one-shot interactive scheduled task
+// for the logged-in user. DO NOT call Start-ScheduledTask — force-starting an
+// Interactive task from SYSTEM (Session 0) silently fails on Windows.
+// The Task Scheduler service correctly injects into the user session when the
+// trigger fires naturally.
+
+function relaunchPs1Block(taskName) {
+  const appExeEsc = APP_EXE.replace(/'/g, "''");
+  return [
+    `$appExe = '${appExeEsc}'`,
+    '$u = (Get-WmiObject Win32_ComputerSystem).UserName',
+    'if ($u -and (Test-Path $appExe)) {',
+    '    $action    = New-ScheduledTaskAction -Execute $appExe -Argument \'--startup\'',
+    '    $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)',
+    '    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)',
+    '    $principal = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited',
+    `    Register-ScheduledTask -TaskName '${taskName}' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null`,
+    '    Start-Sleep -Seconds 30',
+    `    Unregister-ScheduledTask -TaskName '${taskName}' -Confirm:$false -ErrorAction SilentlyContinue`,
+    '}',
+  ];
+}
+
+// ── Shared schtasks registration ────────────────────────────────────────────
+
+function registerSystemTask(taskName, ps1Path, onSuccess) {
+  const startTime = new Date(Date.now() + 10_000);
+  const timeStr   = [
+    String(startTime.getHours()).padStart(2, '0'),
+    String(startTime.getMinutes()).padStart(2, '0'),
+    String(startTime.getSeconds()).padStart(2, '0')
+  ].join(':');
+
+  spawn('schtasks', ['/delete', '/tn', taskName, '/f'], { stdio: 'ignore', windowsHide: true });
+
+  spawn('schtasks', [
+    '/create',
+    '/tn', taskName,
+    '/tr', `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${ps1Path}"`,
+    '/sc', 'once',
+    '/sd', `${String(startTime.getMonth() + 1).padStart(2, '0')}/${String(startTime.getDate()).padStart(2, '0')}/${startTime.getFullYear()}`,
+    '/st', timeStr,
+    '/ru', 'SYSTEM',
+    '/f'
+  ], { stdio: 'ignore', windowsHide: true }).on('close', (code) => {
+    if (code === 0) {
+      console.log(`[Updater] SYSTEM task '${taskName}' registered. Quitting...`);
+      onSuccess();
+    } else {
+      console.warn(`[Updater] schtasks failed (code ${code}). Falling back to direct PowerShell spawn...`);
+      spawn('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path
+      ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      onSuccess();
+    }
+  });
+}
+
+// ── ASAR update ─────────────────────────────────────────────────────────────
 
 /**
- * downloadAndInstall(accessToken)
- * Downloads the latest installer then registers a one-shot scheduled task
- * running as SYSTEM to perform the silent install + relaunch.
- * Using SYSTEM ensures the NSIS perMachine installer never triggers a UAC
- * prompt regardless of the privileges of the currently logged-in user.
+ * Downloads only app.asar and replaces it in-place as the current user.
+ * No SYSTEM task or UAC required — installer.nsh grants BUILTIN\Users
+ * modify rights on app.asar so the logged-in user can write it directly.
+ * The app exits, a detached PS1 waits for the file handle to release,
+ * copies the new asar, then relaunches the app via Start-Process.
  */
-async function downloadAndInstall(accessToken) {
+async function downloadAndInstallAsar(accessToken) {
+  const tmpDir  = os.tmpdir();
+  const asarTmp = path.join(tmpDir, 'BracerChatUpdate.asar');
+  const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
+
+  await downloadFile(ASAR_URL, accessToken, asarTmp);
+  console.log('[Updater] ASAR download complete (~' +
+    Math.round(fs.statSync(asarTmp).size / 1024 / 1024) + ' MB). Queuing replace...');
+
+  const srcEsc    = asarTmp.replace(/'/g, "''");
+  const dstEsc    = ASAR_DST.replace(/'/g, "''");
+  const appExeEsc = APP_EXE.replace(/'/g, "''");
+
+  const ps1Lines = [
+    // Wait for Electron to release the file handle after app.quit()
+    'Start-Sleep -Seconds 4',
+    `$src = '${srcEsc}'`,
+    `$dst = '${dstEsc}'`,
+    `$app = '${appExeEsc}'`,
+    // Retry loop in case the file handle takes a moment to release
+    'for ($i = 0; $i -lt 10; $i++) {',
+    '    try { Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop; break }',
+    '    catch { Start-Sleep -Seconds 2 }',
+    '}',
+    'Remove-Item -Path $src -Force -ErrorAction SilentlyContinue',
+    // Relaunch directly — PS1 already runs as the logged-in user, no schtasks needed
+    'if (Test-Path $app) { Start-Process -FilePath $app -ArgumentList \'--startup\' }',
+    'Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue',
+  ];
+
+  fs.writeFileSync(ps1Path, ps1Lines.join('\r\n'), 'utf8');
+
+  // Spawn detached as current user — no elevation, no schtasks, no SYSTEM
+  spawn('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path
+  ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+
+  setTimeout(() => app.quit(), 1500);
+}
+
+// ── Full installer update ────────────────────────────────────────────────────
+
+/**
+ * Downloads the full NSIS installer and queues a SYSTEM task to run it.
+ * Used only when Electron binary or native deps change version.
+ */
+async function downloadAndInstallFull(accessToken) {
   const tmpDir  = os.tmpdir();
   const exePath = path.join(tmpDir, 'BracerChatUpdate.exe');
   const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
   const TASK    = 'BracerChatUpdate';
 
   await downloadFile(DOWNLOAD_URL, accessToken, exePath);
-  console.log('[Updater] Download complete. Queuing install via SYSTEM task...');
+  console.log('[Updater] Full installer download complete. Queuing SYSTEM install task...');
 
-  // PowerShell script run as SYSTEM:
-  //   1. Wait for the user-session app to exit
-  //   2. Install silently (perMachine — no UAC needed from SYSTEM)
-  //   3. Wait for install to complete
-  //   4. Detect the logged-in user via WMI and create a one-shot interactive
-  //      scheduled task to relaunch the app in their session (with --startup
-  //      so the window stays hidden on auto-relaunch, same as boot behaviour)
-  //   5. Clean up installer + self + the SYSTEM update task
-  const exeEsc = exePath.replace(/'/g, "''");  // PS single-quote escape
+  const exeEsc = exePath.replace(/'/g, "''");
   const ps1Lines = [
     'Start-Sleep -Seconds 4',
     `Start-Process -FilePath '${exeEsc}' -ArgumentList '/S' -Wait -NoNewWindow -WindowStyle Hidden`,
     'Start-Sleep -Seconds 5',
-    `$appExe = '${APP_EXE.replace(/'/g, "''")}'`,
-    '$u = (Get-WmiObject Win32_ComputerSystem).UserName',
-    'if ($u -and (Test-Path $appExe)) {',
-    '    $action    = New-ScheduledTaskAction -Execute $appExe -Argument \'--startup\'',
-    '    $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)',
-    '    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2)',
-    '    $principal = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited',
-    '    Register-ScheduledTask -TaskName \'BracerChatRelaunch\' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null',
-    '    Start-Sleep -Seconds 2',
-    '    Start-ScheduledTask -TaskName \'BracerChatRelaunch\'',
-    '    Start-Sleep -Seconds 5',
-    '    Unregister-ScheduledTask -TaskName \'BracerChatRelaunch\' -Confirm:$false -ErrorAction SilentlyContinue',
-    '}',
+    ...relaunchPs1Block('BracerChatRelaunch'),
     `Remove-Item -Force '${exeEsc}' -ErrorAction SilentlyContinue`,
     `schtasks /delete /tn '${TASK}' /f 2>&1 | Out-Null`,
     'Start-Sleep -Seconds 1',
@@ -125,64 +217,20 @@ async function downloadAndInstall(accessToken) {
   ];
 
   fs.writeFileSync(ps1Path, ps1Lines.join('\r\n'), 'utf8');
-
-  // Register a one-shot SYSTEM scheduled task to run the PS1 script,
-  // starting 5 seconds from now (gives the app time to quit cleanly).
-  const startTime = new Date(Date.now() + 10_000); // 10 s — enough for schtasks to register before trigger fires
-  const timeStr   = [
-    String(startTime.getHours()).padStart(2,'0'),
-    String(startTime.getMinutes()).padStart(2,'0'),
-    String(startTime.getSeconds()).padStart(2,'0')
-  ].join(':');
-
-  // Delete any leftover task from a previous failed update
-  spawn('schtasks', ['/delete', '/tn', TASK, '/f'], { stdio: 'ignore', windowsHide: true });
-
-  spawn('schtasks', [
-    '/create',
-    '/tn', TASK,
-    '/tr', `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${ps1Path}"`,
-    '/sc', 'once',
-    '/sd', `${String(startTime.getMonth() + 1).padStart(2,'0')}/${String(startTime.getDate()).padStart(2,'0')}/${startTime.getFullYear()}`,
-    '/st', timeStr,
-    '/ru', 'SYSTEM',
-    '/f'
-  ], {
-    stdio      : 'ignore',
-    windowsHide: true
-  }).on('close', (code) => {
-    if (code === 0) {
-      console.log('[Updater] SYSTEM install task registered. Quitting...');
-      setTimeout(() => app.quit(), 1500);
-    } else {
-      console.warn('[Updater] schtasks failed (code', code, '). Falling back to direct PowerShell spawn...');
-      spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path], {
-        detached    : true,
-        stdio       : 'ignore',
-        windowsHide : true
-      }).unref();
-      setTimeout(() => app.quit(), 1500);
-    }
-  });
+  registerSystemTask(TASK, ps1Path, () => setTimeout(() => app.quit(), 1500));
 }
 
-/**
- * checkAndUpdate(accessToken)
- * Called on startup with a random jitter delay of 30s–60min so machines don't
- * all hit the update server simultaneously.
- * If a newer version is available: downloads installer, writes batch script,
- * spawns detached, then quits.
- */
+// ── Public API ───────────────────────────────────────────────────────────────
+
 async function checkAndUpdate(accessToken) {
   try {
-    // 1. Check latest version (public endpoint, no auth needed)
     const { status, body } = await httpsGet(CHECK_URL);
     if (status !== 200) {
       console.warn('[Updater] Version check returned', status);
       return;
     }
 
-    const { version: latestVersion } = JSON.parse(body);
+    const { version: latestVersion, update_type: updateType = 'installer' } = JSON.parse(body);
     const currentVersion = app.getVersion();
 
     if (compareVersions(latestVersion, currentVersion) <= 0) {
@@ -190,19 +238,19 @@ async function checkAndUpdate(accessToken) {
       return;
     }
 
-    console.log(`[Updater] Update available: v${currentVersion} → v${latestVersion}. Downloading...`);
-    await downloadAndInstall(accessToken);
+    console.log(`[Updater] Update available: v${currentVersion} → v${latestVersion} (type: ${updateType}). Downloading...`);
+
+    if (updateType === 'asar') {
+      await downloadAndInstallAsar(accessToken);
+    } else {
+      await downloadAndInstallFull(accessToken);
+    }
 
   } catch (err) {
     console.warn('[Updater] Update check failed:', err.message);
   }
 }
 
-/**
- * manualCheckForUpdate(accessToken)
- * Called from the About dialog "Check for Updates" button.
- * Shows dialogs to report status — never silently quits.
- */
 async function manualCheckForUpdate(accessToken) {
   try {
     const { status, body } = await httpsGet(CHECK_URL);
@@ -212,7 +260,7 @@ async function manualCheckForUpdate(accessToken) {
       return;
     }
 
-    const { version: latestVersion } = JSON.parse(body);
+    const { version: latestVersion, update_type: updateType = 'installer' } = JSON.parse(body);
     const currentVersion = app.getVersion();
 
     if (compareVersions(latestVersion, currentVersion) <= 0) {
@@ -232,7 +280,11 @@ async function manualCheckForUpdate(accessToken) {
     });
 
     if (response === 0) {
-      await downloadAndInstall(accessToken);
+      if (updateType === 'asar') {
+        await downloadAndInstallAsar(accessToken);
+      } else {
+        await downloadAndInstallFull(accessToken);
+      }
     }
   } catch (err) {
     dialog.showMessageBox({ type: 'warning', title: 'Update Check Failed',

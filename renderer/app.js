@@ -629,6 +629,9 @@ function scrollToBottom(force = false) {
 let audioCtx = null;
 
 function playNotificationSound() {
+  // Only beep when the window is hidden — if the user is already looking at
+  // the app, the sound is distracting and redundant.
+  if (!document.hidden) return;
   try {
     if (!audioCtx) audioCtx = new AudioContext();
     // AudioContext may be suspended until a user gesture has occurred
