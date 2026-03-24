@@ -38,8 +38,8 @@ const os   = require('os');
 const { readSession }                    = require('./credentials');
 const { getMachineInfo, getWindowsUser, getWindowsUserAsync } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
-const { createTray, destroyTray }        = require('./tray');
-const { createWindow, showWindow, hideWindow, sendToRenderer, flashWindow } = require('./window');
+const { createTray, destroyTray, setTrayBadge, clearTrayBadge } = require('./tray');
+const { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow } = require('./window');
 const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
 const { checkAndUpdate, manualCheckForUpdate }                = require('./updater');
 const { startLogUploader }                                    = require('./logUploader');
@@ -89,6 +89,121 @@ let currentUser      = null;   // Currently logged-in Windows username
 let userPollInterval = null;
 let isAppQuitting    = false;
 let companyName      = null;   // Derived from company broadcast room name
+let unreadCount      = 0;      // Messages received while window not focused
+
+// ── Window position prefs ──────────────────────────────────────────────────
+
+const WINDOW_PREFS_PATH = 'C:\\ProgramData\\BracerChat\\window-prefs.json';
+
+function readWindowPrefs() {
+  try {
+    if (fs.existsSync(WINDOW_PREFS_PATH)) {
+      return JSON.parse(fs.readFileSync(WINDOW_PREFS_PATH, 'utf8'));
+    }
+  } catch {}
+  return { pinned: false };
+}
+
+function saveWindowPrefs(prefs) {
+  try {
+    fs.writeFileSync(WINDOW_PREFS_PATH, JSON.stringify(prefs), 'utf8');
+  } catch (err) {
+    console.error('[BracerChat] Failed to save window prefs:', err.message);
+  }
+}
+
+function getDefaultBounds() {
+  const { workArea } = screen.getPrimaryDisplay();
+  return { x: workArea.x + workArea.width - 360, y: workArea.y, width: 360, height: workArea.height };
+}
+
+/**
+ * Show the window, resetting it to its default position/size first if unpinned.
+ * Only resets when the window is currently hidden (not while visible and in use).
+ */
+function showAndResetIfNeeded(alwaysOnTop = false) {
+  const win = getWindow();
+  if (win && !win.isDestroyed() && !win.isVisible()) {
+    if (!readWindowPrefs().pinned) win.setBounds(getDefaultBounds());
+  }
+  showWindow(alwaysOnTop);
+}
+
+// ── Badge rendering ────────────────────────────────────────────────────────
+
+// Renders a red circle with a white count label using a canvas element in the
+// renderer process — no external dependencies required.
+
+async function renderOverlayBadge(count) {
+  const win = getWindow();
+  if (!win || win.isDestroyed()) return null;
+  const label    = count > 99 ? '99+' : String(count);
+  const fontSize = label.length > 1 ? 8 : 11;
+  const script   = `(() => {
+    const c = document.createElement('canvas');
+    c.width = 20; c.height = 20;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#DC2626';
+    ctx.beginPath(); ctx.arc(10, 10, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold ${fontSize}px Arial';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(${JSON.stringify(label)}, 10, 11);
+    return c.toDataURL('image/png');
+  })()`;
+  try {
+    return nativeImage.createFromDataURL(await win.webContents.executeJavaScript(script));
+  } catch (err) {
+    console.error('[BracerChat] renderOverlayBadge failed:', err.message);
+    return null;
+  }
+}
+
+async function renderTrayBadge(count) {
+  const win = getWindow();
+  if (!win || win.isDestroyed()) return null;
+  const label    = count > 99 ? '99+' : String(count);
+  const fontSize = label.length > 1 ? 7 : 9;
+  const trayUrl  = 'file:///' + path.join(__dirname, '..', 'assets', 'tray.png').replace(/\\/g, '/');
+  const script   = `new Promise(resolve => {
+    const c = document.createElement('canvas');
+    c.width = 32; c.height = 32;
+    const ctx = c.getContext('2d');
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, 32, 32);
+      ctx.fillStyle = '#DC2626';
+      ctx.beginPath(); ctx.arc(24, 8, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'white';
+      ctx.font = 'bold ${fontSize}px Arial';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(${JSON.stringify(label)}, 24, 9);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = () => resolve(null);
+    img.src = '${trayUrl}';
+  })`;
+  try {
+    const dataUrl = await win.webContents.executeJavaScript(script);
+    return dataUrl ? nativeImage.createFromDataURL(dataUrl) : null;
+  } catch (err) {
+    console.error('[BracerChat] renderTrayBadge failed:', err.message);
+    return null;
+  }
+}
+
+async function updateBadges(count) {
+  const win = getWindow();
+  if (!win || win.isDestroyed()) return;
+  if (count <= 0) {
+    win.setOverlayIcon(null, '');
+    clearTrayBadge();
+    return;
+  }
+  const [overlayImg, trayImg] = await Promise.all([renderOverlayBadge(count), renderTrayBadge(count)]);
+  if (overlayImg) win.setOverlayIcon(overlayImg, `${count} unread message${count === 1 ? '' : 's'}`);
+  if (trayImg)   setTrayBadge(trayImg);
+}
 
 // ── Startup ────────────────────────────────────────────────────────────────
 
@@ -115,9 +230,15 @@ app.on('ready', async () => {
     path.join(__dirname, '..', 'renderer', 'index.html')
   );
 
+  // Apply saved window position/size if the user has pinned the window
+  const winPrefs = readWindowPrefs();
+  if (winPrefs.pinned && winPrefs.bounds) {
+    winInstance.setBounds(winPrefs.bounds);
+  }
+
   // Second instance launched (e.g. user double-clicks desktop shortcut) → show window
   app.on('second-instance', () => {
-    showWindow(winInstance);
+    showAndResetIfNeeded(false);
   });
 
   // Close button → hide to tray (not quit)
@@ -128,20 +249,26 @@ app.on('ready', async () => {
     }
   });
 
-  // Stop flashing once the user focuses the window
-  winInstance.on('focus', () => flashWindow(false));
+  // Stop flashing and clear badges once the user focuses the window
+  winInstance.on('focus', () => {
+    flashWindow(false);
+    if (unreadCount > 0) {
+      unreadCount = 0;
+      updateBadges(0);
+    }
+  });
 
   // Show window on manual launch (double-click shortcut, run from Start Menu, etc.)
   // --startup flag is passed by the HKLM Run key and the post-update relaunch task,
   // so those start hidden in the tray. Any other launch shows the window immediately.
   const isStartup = process.argv.includes('--startup');
   if (!app.isPackaged || !isStartup) {
-    showWindow(false);
+    showAndResetIfNeeded(false);
   }
 
   createTray(
     path.join(__dirname, '..', 'assets', 'icon.ico'),
-    () => showWindow(false),
+    () => showAndResetIfNeeded(false),
     () => {
       isAppQuitting = true;
       if (matrixClient) matrixClient.stopSync();
@@ -213,9 +340,12 @@ app.on('ready', async () => {
     const isBroadcast = roomId === session.room_id_broadcast || roomId === session.room_id_company;
     if (isBroadcast) console.log('[BracerChat] broadcast event type:', event.type, 'roomId:', roomId);
     if (roomId === session.room_id_machine || isBroadcast) {
-      showWindow(true); // alwaysOnTop for 5 s
+      showAndResetIfNeeded(true); // alwaysOnTop for 5 s; resets to home if unpinned + hidden
       sendToRenderer('focus-message', { eventId: event.event_id });
       flashWindow(true); // Flash taskbar button until user focuses the window
+      if (!winInstance.isFocused()) {
+        updateBadges(++unreadCount);
+      }
     }
   });
 
@@ -540,4 +670,22 @@ ipcMain.handle('download-file', async (_event, mxcUri, fileName) => {
   const { buffer } = await matrixClient.fetchMedia(mxcUri);
   fs.writeFileSync(filePath, buffer);
   await shell.showItemInFolder(filePath); // reveal in Explorer after save
+});
+
+// Window pin state — controls whether the window returns to its default
+// position/size when shown, or remembers a custom position.
+ipcMain.handle('get-pin-state', () => {
+  return readWindowPrefs();
+});
+
+ipcMain.handle('set-pin-state', (_event, pinned) => {
+  const prefs = readWindowPrefs();
+  prefs.pinned = pinned;
+  if (pinned) {
+    const win = getWindow();
+    if (win && !win.isDestroyed()) prefs.bounds = win.getBounds();
+  } else {
+    delete prefs.bounds;
+  }
+  saveWindowPrefs(prefs);
 });

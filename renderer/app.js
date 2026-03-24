@@ -38,6 +38,7 @@ const elCtxMenu     = document.getElementById('ctx-menu');
 const elCtxPin      = document.getElementById('ctx-pin');
 const elSearchInput = document.getElementById('search-input');
 const elSearchClear = document.getElementById('search-clear');
+const elBtnPinWindow     = document.getElementById('btn-pin-window');
 const elReplyBar         = document.getElementById('reply-bar');
 const elReplyBarLabel    = document.getElementById('reply-bar-label');
 const elReplyBarCancel   = document.getElementById('reply-bar-cancel');
@@ -279,6 +280,10 @@ function yieldToEventLoop() {
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   try {
+    // Load pin state early so the button reflects the correct state on first paint
+    const pinPrefs = await window.bracerChat.getPinState();
+    applyPinButtonState(pinPrefs.pinned);
+
     sessionInfo  = await window.bracerChat.getSessionInfo();
     activeRoomId = sessionInfo.machineRoomId;
 
@@ -1677,6 +1682,21 @@ function escHtml(str) {
 }
 
 elBtnExport.addEventListener('click', exportChat);
+
+// ── Window pin ─────────────────────────────────────────────────────────────
+
+function applyPinButtonState(pinned) {
+  elBtnPinWindow.classList.toggle('pinned', pinned);
+  elBtnPinWindow.setAttribute('aria-pressed', String(pinned));
+  elBtnPinWindow.title = pinned ? 'Unpin window (click to let it return home)' : 'Pin window position';
+}
+
+elBtnPinWindow.addEventListener('click', async () => {
+  const current = elBtnPinWindow.classList.contains('pinned');
+  const next    = !current;
+  applyPinButtonState(next);
+  await window.bracerChat.setPinState(next);
+});
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 init();

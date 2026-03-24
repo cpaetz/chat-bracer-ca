@@ -95,6 +95,13 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Set pinned event IDs in Matrix. Returns false if insufficient power level. @returns {Promise<boolean>} */
   setPinnedEvents: (roomId, pinnedIds) => ipcRenderer.invoke('set-pinned-events', roomId, pinnedIds),
 
+  // ── Window pin ─────────────────────────────────────────────────────────
+  /** @returns {Promise<{pinned: boolean, bounds?: object}>} */
+  getPinState: () => ipcRenderer.invoke('get-pin-state'),
+
+  /** Save or clear the pinned window position. @param {boolean} pinned */
+  setPinState: (pinned) => ipcRenderer.invoke('set-pin-state', pinned),
+
   // ── Events ─────────────────────────────────────────────────────────────
   /** Register a callback for new messages pushed from the sync loop. */
   onNewMessage: (callback) => {
