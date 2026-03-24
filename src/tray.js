@@ -13,6 +13,7 @@ let tray         = null;
 let _onShow      = null;
 let _onQuit      = null;
 let _onRestart   = null;
+let _onAbout     = null;
 
 /**
  * Creates the system tray icon.
@@ -20,11 +21,13 @@ let _onRestart   = null;
  * @param {Function} onShow     Called when user clicks the tray icon or "Open"
  * @param {Function} onQuit     Called when user clicks "Quit"
  * @param {Function} onRestart  Called when user clicks "Restart"
+ * @param {Function} onAbout    Called when user clicks "About Bracer Chat"
  */
-function createTray(iconPath, onShow, onQuit, onRestart) {
+function createTray(iconPath, onShow, onQuit, onRestart, onAbout) {
   _onShow    = onShow;
   _onQuit    = onQuit;
   _onRestart = onRestart;
+  _onAbout   = onAbout;
 
   let icon;
   if (fs.existsSync(iconPath)) {
@@ -47,9 +50,11 @@ function createTray(iconPath, onShow, onQuit, onRestart) {
 function _rebuildMenu() {
   if (!tray) return;
   const menu = Menu.buildFromTemplate([
-    { label: 'Open Bracer Chat', click: () => _onShow    && _onShow()   },
+    { label: 'Open Bracer Chat',   click: () => _onShow    && _onShow()    },
     { type: 'separator' },
-    { label: 'Restart',          click: () => _onRestart && _onRestart() },
+    { label: 'About Bracer Chat',  click: () => _onAbout   && _onAbout()   },
+    { type: 'separator' },
+    { label: 'Restart',            click: () => _onRestart && _onRestart() },
   ]);
   tray.setContextMenu(menu);
 }

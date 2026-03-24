@@ -15,7 +15,7 @@ const fs     = require('fs');
 const path   = require('path');
 const os     = require('os');
 const { spawn } = require('child_process');
-const { app }   = require('electron');
+const { app, dialog } = require('electron');
 
 const CHECK_URL    = 'https://chat.bracer.ca/api/update/check';
 const DOWNLOAD_URL = 'https://chat.bracer.ca/api/update/download';
@@ -141,4 +141,46 @@ async function checkAndUpdate(accessToken) {
   }
 }
 
-module.exports = { checkAndUpdate };
+/**
+ * manualCheckForUpdate(accessToken)
+ * Called from the About dialog "Check for Updates" button.
+ * Shows dialogs to report status — never silently quits.
+ */
+async function manualCheckForUpdate(accessToken) {
+  try {
+    const { status, body } = await httpsGet(CHECK_URL);
+    if (status !== 200) {
+      dialog.showMessageBox({ type: 'warning', title: 'Update Check Failed',
+        message: 'Could not reach the update server.', buttons: ['OK'] });
+      return;
+    }
+
+    const { version: latestVersion } = JSON.parse(body);
+    const currentVersion = app.getVersion();
+
+    if (compareVersions(latestVersion, currentVersion) <= 0) {
+      dialog.showMessageBox({ type: 'info', title: 'Up to Date',
+        message: `Bracer Chat v${currentVersion} is the latest version.`, buttons: ['OK'] });
+      return;
+    }
+
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      title: 'Update Available',
+      message: `Bracer Chat v${latestVersion} is available`,
+      detail: `You are running v${currentVersion}. The update will install and restart the app.`,
+      buttons: ['Install Update', 'Later'],
+      defaultId: 0,
+      cancelId: 1
+    });
+
+    if (response === 0) {
+      await downloadAndInstall(accessToken);
+    }
+  } catch (err) {
+    dialog.showMessageBox({ type: 'warning', title: 'Update Check Failed',
+      message: `Could not check for updates: ${err.message}`, buttons: ['OK'] });
+  }
+}
+
+module.exports = { checkAndUpdate, manualCheckForUpdate };

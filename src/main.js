@@ -41,7 +41,7 @@ const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray }        = require('./tray');
 const { createWindow, showWindow, hideWindow, sendToRenderer } = require('./window');
 const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
-const { checkAndUpdate }                                      = require('./updater');
+const { checkAndUpdate, manualCheckForUpdate }                = require('./updater');
 const { startLogUploader }                                    = require('./logUploader');
 
 // ── Win32 screen-capture exclusion (WDA_EXCLUDEFROMCAPTURE) ───────────────
@@ -149,6 +149,24 @@ app.on('ready', async () => {
       clearInterval(userPollInterval);
       app.relaunch();
       app.quit();
+    },
+    () => {
+      dialog.showMessageBox({
+        type   : 'info',
+        title  : 'About Bracer Chat',
+        message: 'Bracer Chat',
+        detail : [
+          `Version ${app.getVersion()}`,
+          '',
+          'A Bracer Systems Inc. product',
+          '\u00A9 2026 Bracer Systems Inc.'
+        ].join('\n'),
+        buttons  : ['Check for Updates', 'Close'],
+        defaultId: 1,
+        cancelId : 1
+      }).then(({ response }) => {
+        if (response === 0) manualCheckForUpdate(session.access_token);
+      });
     }
   );
 

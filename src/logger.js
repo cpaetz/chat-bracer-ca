@@ -45,12 +45,29 @@ function writeLine(level, args) {
   }
 }
 
+function pruneOldLines() {
+  try {
+    if (!fs.existsSync(LOG_PATH)) return;
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const lines = fs.readFileSync(LOG_PATH, 'utf8').split('\n');
+    const kept = lines.filter(line => {
+      const m = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+      if (!m) return true; // keep lines without a recognised timestamp
+      return new Date(m[1]).getTime() >= cutoff;
+    });
+    fs.writeFileSync(LOG_PATH, kept.join('\n'), 'utf8');
+  } catch (_) {}
+}
+
 function setupLogging() {
   // Ensure log directory exists
   try {
     const dir = 'C:\\ProgramData\\BracerChat';
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   } catch (_) {}
+
+  // Prune lines older than 7 days on startup
+  pruneOldLines();
 
   // Only mirror console.warn and console.error — not console.log
   const origWarn  = console.warn.bind(console);
