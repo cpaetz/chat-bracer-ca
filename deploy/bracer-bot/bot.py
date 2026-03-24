@@ -218,7 +218,7 @@ async def _is_bracer_room(room_id: str) -> bool:
     headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
     url = f"{MATRIX_HOMESERVER}/_synapse/admin/v1/rooms/{room_id}"
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     return False
@@ -237,7 +237,7 @@ async def _get_company_name(hostname: str) -> str | None:
     base = MATRIX_HOMESERVER
     headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         url = f"{base}/_synapse/admin/v1/users/{machine_user}/joined_rooms"
         async with session.get(url, headers=headers) as resp:
             if resp.status != 200:
@@ -276,7 +276,7 @@ async def _get_superops_client_id(company_name: str) -> str | None:
         }
     }
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         async with session.post(SUPEROPS_GQL_URL, headers=headers, json={"query": query}) as resp:
             data = await resp.json(content_type=None)
 
@@ -326,7 +326,7 @@ async def create_superops_ticket(
     if account_id:
         variables["input"]["client"] = {"accountId": account_id}
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         async with session.post(
             SUPEROPS_GQL_URL,
             headers=headers,
@@ -472,7 +472,8 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                 ticket_id = await create_superops_ticket(issue, description, priority, account_id)
                 log_ticket(room_id)
                 await _send(client, room_id,
-                    f"Done! Ticket #{ticket_id} created. A technician will follow up.")
+                    f"Done! Ticket #{ticket_id} created. A technician will follow up.\n"
+                    "View your ticket: https://bracer.superops.ai/portal")
                 log.info(
                     f"Ticket #{ticket_id} created — "
                     f"room={room_id} host={hostname} company={company}"

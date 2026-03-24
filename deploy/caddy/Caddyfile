@@ -1,0 +1,61 @@
+chat.bracer.ca {
+    # Installer Generator UI (Basic Auth required)
+    handle /installer/* {
+        basic_auth {
+            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
+        }
+        root * /var/www
+        file_server
+    }
+
+    # Installer API — generate + companies (Basic Auth required, called from UI)
+    handle /api/installer/generate {
+        basic_auth {
+            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
+        }
+        reverse_proxy 127.0.0.1:5050
+    }
+
+    handle /api/installer/companies {
+        basic_auth {
+            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
+        }
+        reverse_proxy 127.0.0.1:5050
+    }
+
+    # Serve installer downloads (Basic Auth required)
+    handle /install/* {
+        basic_auth {
+            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
+        }
+        root * /var/www
+        file_server
+    }
+
+    root * /var/www/element
+    file_server
+
+    # Block Synapse admin API from public access
+    respond /_synapse/admin/* 403
+
+    reverse_proxy /_matrix/* 127.0.0.1:8008
+    reverse_proxy /_synapse/* 127.0.0.1:8008
+    reverse_proxy /api/* 127.0.0.1:5050
+    reverse_proxy /health 127.0.0.1:5050
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    encode gzip
+}
+
+# Tailscale-only: full Synapse access including admin API
+http://100.99.89.118 {
+    reverse_proxy /_matrix/* 127.0.0.1:8008
+    reverse_proxy /_synapse/* 127.0.0.1:8008
+}

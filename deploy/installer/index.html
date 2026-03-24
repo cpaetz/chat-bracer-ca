@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bracer Chat — Installer Generator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2d3148;
+      border-radius: 12px;
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }
+    .logo {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #7c6af7;
+      margin-bottom: 0.25rem;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #64748b;
+      margin-bottom: 2rem;
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+    select {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 0.95rem;
+      margin-bottom: 1.5rem;
+      appearance: none;
+      cursor: pointer;
+      outline: none;
+    }
+    select:focus { border-color: #7c6af7; }
+    button {
+      width: 100%;
+      padding: 0.85rem;
+      background: #7c6af7;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: #6a58e5; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .result {
+      display: none;
+      margin-top: 1.5rem;
+      padding: 1.25rem;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+    }
+    .result.show { display: block; }
+    .result-label {
+      font-size: 0.75rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.75rem;
+    }
+    .download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1.25rem;
+      background: #16a34a;
+      color: #fff;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      transition: background 0.15s;
+      width: 100%;
+      justify-content: center;
+    }
+    .download-btn:hover { background: #15803d; }
+    .info {
+      margin-top: 1rem;
+      font-size: 0.8rem;
+      color: #64748b;
+      line-height: 1.6;
+    }
+    .info strong { color: #94a3b8; }
+    .error {
+      display: none;
+      margin-top: 1rem;
+      padding: 0.75rem 1rem;
+      background: #450a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      color: #fca5a5;
+      font-size: 0.85rem;
+    }
+    .error.show { display: block; }
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.4rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Bracer Chat</div>
+    <div class="subtitle">Installer Generator &mdash; Staff Only</div>
+
+    <label for="company">Select Company</label>
+    <select id="company" disabled>
+      <option value="">Loading companies...</option>
+    </select>
+
+    <button id="generateBtn" disabled onclick="generate()">Generate Installer</button>
+
+    <div class="error" id="errorMsg"></div>
+
+    <div class="result" id="result">
+      <div class="result-label">Installer Ready</div>
+      <a class="download-btn" id="downloadLink" href="#">
+        &#8595; Download Installer EXE
+      </a>
+      <div class="info" id="resultInfo"></div>
+    </div>
+  </div>
+
+  <script>
+    const sel = document.getElementById('company');
+    const btn = document.getElementById('generateBtn');
+    const err = document.getElementById('errorMsg');
+    const res = document.getElementById('result');
+
+    async function loadCompanies() {
+      try {
+        const r = await fetch('/api/installer/companies');
+        if (!r.ok) throw new Error('Failed to load companies');
+        const data = await r.json();
+        sel.innerHTML = '<option value="">-- Select a company --</option>';
+        data.companies.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c; opt.textContent = c;
+          sel.appendChild(opt);
+        });
+        sel.disabled = false;
+        sel.onchange = () => { btn.disabled = !sel.value; res.classList.remove('show'); };
+      } catch (e) {
+        sel.innerHTML = '<option value="">Error loading companies</option>';
+        showError('Could not load company list: ' + e.message);
+      }
+    }
+
+    async function generate() {
+      const company = sel.value;
+      if (!company) return;
+
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Generating...';
+      err.classList.remove('show');
+      res.classList.remove('show');
+
+      try {
+        const r = await fetch('/api/installer/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company })
+        });
+        if (!r.ok) throw new Error(`Server error: ${r.status}`);
+        const data = await r.json();
+
+        const expiry = new Date(data.expires_at * 1000);
+        const expiryStr = expiry.toLocaleString();
+        const link = document.getElementById('downloadLink');
+        link.href = `/api/installer/download?token=${data.token}`;
+        link.download = `BracerChatInstall-${company.replace(/[^a-zA-Z0-9]/g,'-')}.exe`;
+
+        document.getElementById('resultInfo').innerHTML =
+          `<strong>Company:</strong> ${company}<br>` +
+          `<strong>Valid until:</strong> ${expiryStr}<br>` +
+          `<strong>Usage:</strong> Run as Administrator on each machine. One EXE covers the full site.`;
+
+        res.classList.add('show');
+      } catch (e) {
+        showError('Failed to generate installer: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Generate Installer';
+      }
+    }
+
+    function showError(msg) {
+      err.textContent = msg;
+      err.classList.add('show');
+    }
+
+    loadCompanies();
+  </script>
+</body>
+</html>

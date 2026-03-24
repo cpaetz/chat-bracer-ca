@@ -1,0 +1,18 @@
+[Unit]
+Description=Bracer Registration API
+After=network.target matrix-synapse.service
+Requires=matrix-synapse.service
+
+[Service]
+Type=simple
+User=bracer-register
+Group=bracer-register
+WorkingDirectory=/opt/bracer-register
+EnvironmentFile=/opt/bracer-register/.token-env
+ExecStart=op run --env-file=/opt/bracer-register/.env.op -- /opt/bracer-register/venv/bin/uvicorn app:app --host 127.0.0.1 --port 5050 --no-access-log
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
