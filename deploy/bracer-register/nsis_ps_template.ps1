@@ -86,16 +86,21 @@ try {
         Write-Log "Auto-start registry key set"
     }
 
-    # 9. Launch BracerChat immediately as the current user
+    # 9. Launch BracerChat immediately as the logged-in user (WMI — works when running as SYSTEM)
     if (Test-Path $exePath) {
         Write-Log "Launching BracerChat..."
-        $action    = New-ScheduledTaskAction -Execute $exePath -Argument '--startup'
-        $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)
-        $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName 'BracerChatLaunch' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-        Start-ScheduledTask -TaskName 'BracerChatLaunch'
-        Write-Log "Launch task scheduled"
+        $loggedInUser = (Get-WmiObject Win32_ComputerSystem).UserName
+        if ($loggedInUser) {
+            $action    = New-ScheduledTaskAction -Execute $exePath -Argument '--startup'
+            $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(3)
+            $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+            $principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive -RunLevel Limited
+            Register-ScheduledTask -TaskName 'BracerChatLaunch' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'BracerChatLaunch'
+            Write-Log "Launch task scheduled for $loggedInUser"
+        } else {
+            Write-Log "No logged-in user detected — skipping launch task (app will start on next login via Run key)"
+        }
     }
 
     Write-Log "Installation complete."
