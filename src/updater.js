@@ -104,7 +104,7 @@ async function downloadAndInstall(accessToken) {
   const ps1Lines = [
     'Start-Sleep -Seconds 4',
     `Start-Process -FilePath '${exeEsc}' -ArgumentList '/S' -Wait -NoNewWindow -WindowStyle Hidden`,
-    'Start-Sleep -Seconds 60',
+    'Start-Sleep -Seconds 5',
     `$appExe = '${APP_EXE.replace(/'/g, "''")}'`,
     '$u = (Get-WmiObject Win32_ComputerSystem).UserName',
     'if ($u -and (Test-Path $appExe)) {',
@@ -128,8 +128,12 @@ async function downloadAndInstall(accessToken) {
 
   // Register a one-shot SYSTEM scheduled task to run the PS1 script,
   // starting 5 seconds from now (gives the app time to quit cleanly).
-  const startTime = new Date(Date.now() + 5000);
-  const timeStr   = `${String(startTime.getHours()).padStart(2,'0')}:${String(startTime.getMinutes()).padStart(2,'0')}`;
+  const startTime = new Date(Date.now() + 10_000); // 10 s — enough for schtasks to register before trigger fires
+  const timeStr   = [
+    String(startTime.getHours()).padStart(2,'0'),
+    String(startTime.getMinutes()).padStart(2,'0'),
+    String(startTime.getSeconds()).padStart(2,'0')
+  ].join(':');
 
   // Delete any leftover task from a previous failed update
   spawn('schtasks', ['/delete', '/tn', TASK, '/f'], { stdio: 'ignore', windowsHide: true });
@@ -139,6 +143,7 @@ async function downloadAndInstall(accessToken) {
     '/tn', TASK,
     '/tr', `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${ps1Path}"`,
     '/sc', 'once',
+    '/sd', `${String(startTime.getMonth() + 1).padStart(2,'0')}/${String(startTime.getDate()).padStart(2,'0')}/${startTime.getFullYear()}`,
     '/st', timeStr,
     '/ru', 'SYSTEM',
     '/f'
