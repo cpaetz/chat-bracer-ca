@@ -15,9 +15,10 @@
  * Auth: uses the machine's Matrix access_token from session.dat.
  */
 
-const https  = require('https');
-const fs     = require('fs');
-const path   = require('path');
+const https    = require('https');
+const fs       = require('fs');
+const origFs   = require('original-fs');  // Bypass Electron ASAR interception for raw file I/O
+const path     = require('path');
 const os     = require('os');
 const { spawn } = require('child_process');
 const { app, dialog } = require('electron');
@@ -66,18 +67,20 @@ function downloadFile(url, accessToken, destPath) {
       path    : opts.pathname,
       headers : { Authorization: `Bearer ${accessToken}` }
     };
-    const file = fs.createWriteStream(destPath);
+    // Use original-fs to bypass Electron's ASAR virtual filesystem —
+    // without this, writing to a .asar path triggers "Invalid package" errors.
+    const file = origFs.createWriteStream(destPath);
     https.get(reqOpts, (res) => {
       if (res.statusCode !== 200) {
         file.close();
-        fs.unlink(destPath, () => {});
+        origFs.unlink(destPath, () => {});
         reject(new Error(`Download failed: HTTP ${res.statusCode}`));
         return;
       }
       res.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
-      file.on('error', (err) => { fs.unlink(destPath, () => {}); reject(err); });
-    }).on('error', (err) => { fs.unlink(destPath, () => {}); reject(err); });
+      file.on('error', (err) => { origFs.unlink(destPath, () => {}); reject(err); });
+    }).on('error', (err) => { origFs.unlink(destPath, () => {}); reject(err); });
   });
 }
 
@@ -156,7 +159,7 @@ async function downloadAndInstallAsar(accessToken) {
 
   await downloadFile(ASAR_URL, accessToken, asarTmp);
   console.log('[Updater] ASAR download complete (~' +
-    Math.round(fs.statSync(asarTmp).size / 1024 / 1024) + ' MB). Queuing replace...');
+    Math.round(origFs.statSync(asarTmp).size / 1024 / 1024) + ' MB). Queuing replace...');
 
   const srcEsc    = asarTmp.replace(/'/g, "''");
   const dstEsc    = ASAR_DST.replace(/'/g, "''");

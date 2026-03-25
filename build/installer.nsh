@@ -11,6 +11,11 @@
   ; replace it as the logged-in user without elevation or a SYSTEM task.
   nsExec::ExecToLog 'icacls "$INSTDIR\resources\app.asar" /grant "*S-1-5-32-545:(M)" /Q'
 
+  ; Grant BUILTIN\Users modify rights on the ProgramData directory so the app
+  ; can write window-prefs.json, update logs, etc. without elevation.
+  CreateDirectory "C:\ProgramData\BracerChat"
+  nsExec::ExecToLog 'icacls "C:\ProgramData\BracerChat" /grant "*S-1-5-32-545:(OI)(CI)(M)" /Q'
+
   ; Register watchdog scheduled task via base64-encoded PowerShell command.
   ; Task runs every 5 min for any logged-in user (GroupId = BUILTIN\Users).
   ; Single-instance lock means a duplicate launch is harmless if app is already running.

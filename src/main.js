@@ -100,7 +100,9 @@ function readWindowPrefs() {
     if (fs.existsSync(WINDOW_PREFS_PATH)) {
       return JSON.parse(fs.readFileSync(WINDOW_PREFS_PATH, 'utf8'));
     }
-  } catch {}
+  } catch (err) {
+    console.error('[BracerChat] Failed to read window prefs:', err.message);
+  }
   return { pinned: false };
 }
 
@@ -121,14 +123,29 @@ function getDefaultBounds() {
  * Show the window, resetting it to its default position/size first if unpinned.
  * Only resets when the window is currently hidden (not while visible and in use).
  */
+function boundsVisibleOnAnyDisplay(b) {
+  // Require at least 50px of the window to be on-screen
+  const MIN_OVERLAP = 50;
+  return screen.getAllDisplays().some(d => {
+    const wa = d.workArea;
+    return b.x + b.width  > wa.x + MIN_OVERLAP &&
+           b.x            < wa.x + wa.width  - MIN_OVERLAP &&
+           b.y + b.height > wa.y + MIN_OVERLAP &&
+           b.y            < wa.y + wa.height - MIN_OVERLAP;
+  });
+}
+
 function showAndResetIfNeeded(alwaysOnTop = false) {
   const win = getWindow();
   let bounds = null;
   if (win && !win.isDestroyed() && !win.isVisible()) {
     const prefs = readWindowPrefs();
-    if (prefs.pinned && prefs.bounds) {
+    if (prefs.pinned && prefs.bounds && boundsVisibleOnAnyDisplay(prefs.bounds)) {
       bounds = prefs.bounds;
     } else if (!prefs.pinned) {
+      bounds = getDefaultBounds();
+    } else {
+      // Pinned bounds are off-screen (monitor removed/resolution changed) — fall back to default
       bounds = getDefaultBounds();
     }
   }
@@ -540,6 +557,7 @@ ipcMain.handle('send-screenshot', async (_event, roomId, sourceId) => {
   // Use WDA_EXCLUDEFROMCAPTURE to exclude this window from the DWM capture
   // pipeline — window stays visible to the user but is absent from the screenshot.
   const winRef = require('./window').getWindow();
+  if (!winRef || winRef.isDestroyed()) throw new Error('Window not available for screenshot');
   // Read HWND as BigInt — getNativeWindowHandle() returns an 8-byte LE buffer on x64 Windows
   const hwnd = winRef.getNativeWindowHandle().readBigUInt64LE(0);
 

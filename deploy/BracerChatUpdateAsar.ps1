@@ -256,6 +256,17 @@ function Invoke-AsarUpdate {
         Log-Message "icacls grant failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
     }
 
+    # Grant BUILTIN\Users modify rights on ProgramData\BracerChat so the app
+    # can write window-prefs.json, update logs, etc. without elevation.
+    $DataDir = 'C:\ProgramData\BracerChat'
+    if (-not (Test-Path $DataDir)) { New-Item -Path $DataDir -ItemType Directory -Force | Out-Null }
+    try {
+        icacls $DataDir /grant '*S-1-5-32-545:(OI)(CI)(M)' /Q | Out-Null
+        Log-Message "Granted Users modify rights on $DataDir."
+    } catch {
+        Log-Message "icacls on data dir failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
+    }
+
     Start-BracerChatAsUser
 }
 
