@@ -103,6 +103,7 @@ function Remove-OpCli {
 function Remove-StaleTasks {
     $StaleTasks = @(
         'BracerChatAsarRelaunch',
+        'BracerChatAsarUpdate',
         'BracerChatRelaunch',
         'BracerChatUpdate',
         'BracerChatPostInstallLaunch'
@@ -124,12 +125,12 @@ function Remove-StaleTasks {
     # Task Scheduler to kill the app 2 minutes after every launch.
     $WatchdogName = 'Bracer Chat Watchdog'
     Unregister-ScheduledTask -TaskName $WatchdogName -Confirm:$false -ErrorAction SilentlyContinue
-    $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--startup'
-    $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--watchdog'
+    $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)
     $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
     $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
     Register-ScheduledTask -TaskName $WatchdogName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
-    Log-Message "Watchdog task rebuilt with no execution time limit."
+    Log-Message "Watchdog task rebuilt with --watchdog flag and no execution time limit."
 
     Log-Message "Stale tasks and temp files cleaned up."
 }

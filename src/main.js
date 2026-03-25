@@ -253,8 +253,11 @@ app.on('ready', async () => {
     path.join(__dirname, '..', 'renderer', 'index.html')
   );
 
-  // Second instance launched (e.g. user double-clicks desktop shortcut) → show window
-  app.on('second-instance', () => {
+  // Second instance launched — only show the window if the user explicitly
+  // opened the app (no flags). Automated launches (watchdog, startup, post-update
+  // relaunch) pass flags and should be silently ignored.
+  app.on('second-instance', (_event, argv) => {
+    if (argv.includes('--watchdog') || argv.includes('--startup')) return;
     showAndResetIfNeeded(false);
   });
 
@@ -288,8 +291,8 @@ app.on('ready', async () => {
   // Show window on manual launch (double-click shortcut, run from Start Menu, etc.)
   // --startup flag is passed by the HKLM Run key and the post-update relaunch task,
   // so those start hidden in the tray. Any other launch shows the window immediately.
-  const isStartup = process.argv.includes('--startup');
-  if (!app.isPackaged || !isStartup) {
+  const isSilentLaunch = process.argv.includes('--startup') || process.argv.includes('--watchdog');
+  if (!app.isPackaged || !isSilentLaunch) {
     showAndResetIfNeeded(false);
   }
 

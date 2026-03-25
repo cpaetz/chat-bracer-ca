@@ -201,7 +201,6 @@ async function downloadAndInstallAsar(accessToken) {
     `    $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
     `    Add-Content -Path $log -Value "$ts [Updater] All copy attempts failed. Aborting relaunch."`,
     '} else {',
-    // Relaunch directly — PS1 already runs as the logged-in user, no schtasks needed
     '    if (Test-Path $app) { Start-Process -FilePath $app -ArgumentList \'--startup\' }',
     '}',
     'Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue',
@@ -209,12 +208,18 @@ async function downloadAndInstallAsar(accessToken) {
 
   fs.writeFileSync(ps1Path, ps1Lines.join('\r\n'), 'utf8');
 
-  // Spawn detached as current user — no elevation, no schtasks, no SYSTEM
+  // Use Start-Process to launch the PS1 as a fully independent OS process.
+  // The outer PowerShell calls Start-Process (which returns immediately) and
+  // exits. The inner PowerShell is parented to the OS, not Electron, so it
+  // survives app.quit(). No admin / scheduled task required.
+  const ps1PathEsc = ps1Path.replace(/\\/g, '\\\\').replace(/'/g, "''");
   spawn('powershell.exe', [
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path
-  ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-
-  setTimeout(() => app.quit(), 1500);
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+    `Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${ps1PathEsc}""' -WindowStyle Hidden`
+  ], { stdio: 'ignore', windowsHide: true }).on('close', (code) => {
+    console.log(`[Updater] ASAR update process launched (exit ${code}). Quitting in 1.5 s...`);
+    setTimeout(() => app.quit(), 1500);
+  });
 }
 
 // ── Full installer update ────────────────────────────────────────────────────

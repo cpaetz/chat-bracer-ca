@@ -542,7 +542,7 @@ function renderMessage(event, prepend = false) {
     let insertBefore = null;
     const bubbles = elMessages.children;
     for (let i = bubbles.length - 1; i >= 0; i--) {
-      const sibTs = bubbles[i]._matrixEvent && bubbles[i]._matrixEvent.origin_server_ts || 0;
+      const sibTs = bubbles[i]._matrixEvent?.origin_server_ts || 0;
       if (sibTs <= ts) {
         insertBefore = bubbles[i].nextSibling;
         break;
