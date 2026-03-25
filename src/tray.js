@@ -9,26 +9,32 @@
 const { Tray, Menu, nativeImage } = require('electron');
 const fs   = require('fs');
 
-let tray         = null;
-let _onShow      = null;
-let _onQuit      = null;
-let _onRestart   = null;
-let _onAbout     = null;
-let _baseIcon    = null;  // nativeImage for the unmodified tray icon
+let tray           = null;
+let _onShow        = null;
+let _onQuit        = null;
+let _onRestart     = null;
+let _onAbout       = null;
+let _baseIcon      = null;  // nativeImage for the unmodified tray icon
+let _onSettingChange = null;
+let _settings        = { alwaysOnTop: true };
 
 /**
  * Creates the system tray icon.
- * @param {string}   iconPath   Path to tray.png (16x16 or 32x32)
- * @param {Function} onShow     Called when user clicks the tray icon or "Open"
- * @param {Function} onQuit     Called when user clicks "Quit"
- * @param {Function} onRestart  Called when user clicks "Restart"
- * @param {Function} onAbout    Called when user clicks "About Bracer Chat"
+ * @param {string}   iconPath        Path to tray.png (16x16 or 32x32)
+ * @param {Function} onShow          Called when user clicks the tray icon or "Open"
+ * @param {Function} onQuit          Called when user clicks "Quit"
+ * @param {Function} onRestart       Called when user clicks "Restart"
+ * @param {Function} onAbout         Called when user clicks "About Bracer Chat"
+ * @param {Function} onSettingChange Called with (key, value) when a setting changes
+ * @param {object}   settings        Initial settings (alwaysOnTop, etc.)
  */
-function createTray(iconPath, onShow, onQuit, onRestart, onAbout) {
-  _onShow    = onShow;
-  _onQuit    = onQuit;
-  _onRestart = onRestart;
-  _onAbout   = onAbout;
+function createTray(iconPath, onShow, onQuit, onRestart, onAbout, onSettingChange, settings) {
+  _onShow          = onShow;
+  _onQuit          = onQuit;
+  _onRestart       = onRestart;
+  _onAbout         = onAbout;
+  _onSettingChange = onSettingChange;
+  if (settings) _settings = { ..._settings, ...settings };
 
   let icon;
   if (fs.existsSync(iconPath)) {
@@ -53,6 +59,13 @@ function _rebuildMenu() {
   if (!tray) return;
   const menu = Menu.buildFromTemplate([
     { label: 'Open Bracer Chat',   click: () => _onShow    && _onShow()    },
+    { type: 'separator' },
+    { label: 'Always on Top', type: 'checkbox', checked: _settings.alwaysOnTop,
+      click: (menuItem) => {
+        _settings.alwaysOnTop = menuItem.checked;
+        if (_onSettingChange) _onSettingChange('alwaysOnTop', menuItem.checked);
+      }
+    },
     { type: 'separator' },
     { label: 'About Bracer Chat',  click: () => _onAbout   && _onAbout()   },
     { type: 'separator' },

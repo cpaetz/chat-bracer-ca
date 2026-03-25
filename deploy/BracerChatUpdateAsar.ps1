@@ -132,6 +132,13 @@ function Remove-StaleTasks {
     Register-ScheduledTask -TaskName $WatchdogName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
     Log-Message "Watchdog task rebuilt with --watchdog flag and no execution time limit."
 
+    # Fix HKLM Run key to include --startup so the app starts hidden on boot.
+    # Older installs wrote the key without this flag, causing the window to show on login.
+    $RunKeyPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+    $RunKeyValue = "`"${AppExe}`" --startup"
+    Set-ItemProperty -Path $RunKeyPath -Name 'Bracer Chat' -Value $RunKeyValue -ErrorAction SilentlyContinue
+    Log-Message "HKLM Run key updated with --startup flag."
+
     Log-Message "Stale tasks and temp files cleaned up."
 }
 

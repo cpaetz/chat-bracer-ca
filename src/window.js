@@ -61,9 +61,9 @@ function createWindow(preloadPath, htmlPath) {
  * Shows the chat window with a short opacity fade-in.
  * Starting at opacity 0 suppresses the Windows animation (which looks wrong
  * for a skipTaskbar window that has no taskbar button to animate toward).
- * @param {boolean} alwaysOnTop  If true, window pops above everything for 5 s.
+ * @param {boolean} alwaysOnTop  Whether to set always-on-top (from user setting).
  */
-function showWindow(alwaysOnTop = false, bounds = null) {
+function showWindow(alwaysOnTop = true, bounds = null) {
   if (!win || win.isDestroyed()) return;
 
   if (!win.isVisible()) {
@@ -93,15 +93,8 @@ function showWindow(alwaysOnTop = false, bounds = null) {
     win.focus();
   }
 
-  if (alwaysOnTop) {
-    win.setAlwaysOnTop(true);
-    win.moveTop();
-    setTimeout(() => {
-      if (win && !win.isDestroyed()) win.setAlwaysOnTop(false);
-    }, 5_000);
-  } else {
-    win.setAlwaysOnTop(false);
-  }
+  win.setAlwaysOnTop(alwaysOnTop);
+  win.moveTop();
 }
 
 /**
@@ -135,6 +128,10 @@ function sendToRenderer(channel, ...args) {
 
 function getWindow() { return win; }
 
+function setAlwaysOnTop(value) {
+  if (win && !win.isDestroyed()) win.setAlwaysOnTop(value);
+}
+
 /**
  * Flash (or stop flashing) the taskbar button to signal unread messages.
  * @param {boolean} flash  true = start flashing, false = stop
@@ -143,4 +140,4 @@ function flashWindow(flash) {
   if (win && !win.isDestroyed()) win.flashFrame(flash);
 }
 
-module.exports = { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow };
+module.exports = { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow, setAlwaysOnTop };

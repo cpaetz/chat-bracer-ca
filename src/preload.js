@@ -119,5 +119,18 @@ contextBridge.exposeInMainWorld('bracerChat', {
    */
   onFocusMessage: (callback) => {
     ipcRenderer.on('focus-message', (_event, data) => callback(data));
-  }
+  },
+
+  // ── Typing indicators ─────────────────────────────────────────────────
+  /** Send typing notification. @param {boolean} typing */
+  sendTyping: (roomId, typing) => ipcRenderer.invoke('send-typing', roomId, typing),
+
+  /** Register a callback for typing updates. Called with { roomId, userIds }. */
+  onTypingUpdate: (callback) => {
+    ipcRenderer.on('typing-update', (_event, data) => callback(data));
+  },
+
+  // ── Read receipts ─────────────────────────────────────────────────────
+  /** Send a read receipt for the latest viewed event. */
+  sendReadReceipt: (roomId, eventId) => ipcRenderer.invoke('send-read-receipt', roomId, eventId)
 });

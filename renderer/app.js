@@ -28,6 +28,7 @@ const elScreenPicker       = document.getElementById('screen-picker');
 const elScreenPickerMap    = document.getElementById('screen-picker-map');
 const elScreenPickerCancel = document.getElementById('screen-picker-cancel');
 const elBtnTicket   = document.getElementById('btn-ticket');
+const elTypingInd   = document.getElementById('typing-indicator');
 const elStatusBar   = document.getElementById('status-bar');
 const elDragOverlay = document.querySelector('.drag-overlay');
 const elPinnedPanel = document.getElementById('pinned-panel');
@@ -301,6 +302,11 @@ async function init() {
 
     // Start listening for new messages delivered by the sync loop
     window.bracerChat.onNewMessage(handleIncomingMessage);
+
+    // Scroll to bottom whenever the window becomes visible (e.g. opened from tray)
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) scrollToBottom(true);
+    });
 
     // When window is shown due to an incoming message: expand pinned panel
     // and scroll to the triggering message
@@ -610,7 +616,7 @@ async function loadHistory() {
     }
   }
 
-  scrollToBottom();
+  scrollToBottom(true); // Force scroll after initial history load
 }
 
 function isNearBottom() {
@@ -818,6 +824,10 @@ async function handleIncomingMessage({ roomId, event }) {
   }
   applySearch();
   scrollToBottom();
+  // Schedule a delayed read receipt if the window is visible
+  if (!document.hidden && event.event_id) {
+    scheduleReadReceipt();
+  }
 }
 
 function makePinBtn(event) {
@@ -947,6 +957,12 @@ async function sendMessage() {
   elMsgInput.value = '';
   autoResizeTextarea();
   clearReply();
+  // Stop typing indicator immediately on send
+  if (_isTyping) {
+    _isTyping = false;
+    clearTimeout(_typingTimer);
+    window.bracerChat.sendTyping(activeRoomId, false).catch(() => {});
+  }
   elBtnSend.disabled = true;
 
   try {
@@ -1284,6 +1300,64 @@ elMsgInput.addEventListener('keydown', (e) => {
 });
 
 elMsgInput.addEventListener('input', autoResizeTextarea);
+
+// ── Typing indicator — outbound ─────────────────────────────────────────
+// Send typing notification when user types, with debounce to avoid spam.
+let _typingTimer = null;
+let _isTyping    = false;
+elMsgInput.addEventListener('input', () => {
+  if (!activeRoomId) return;
+  if (!_isTyping) {
+    _isTyping = true;
+    window.bracerChat.sendTyping(activeRoomId, true).catch(() => {});
+  }
+  clearTimeout(_typingTimer);
+  _typingTimer = setTimeout(() => {
+    _isTyping = false;
+    window.bracerChat.sendTyping(activeRoomId, false).catch(() => {});
+  }, 4000);
+});
+
+// ── Typing indicator — inbound ──────────────────────────────────────────
+window.bracerChat.onTypingUpdate(({ roomId, userIds }) => {
+  if (roomId !== activeRoomId) return;
+  if (userIds.length === 0) {
+    elTypingInd.textContent = '';
+  } else if (userIds.length === 1) {
+    const name = userIds[0].split(':')[0].replace('@', '');
+    elTypingInd.textContent = `${name} is typing...`;
+  } else {
+    elTypingInd.textContent = 'Several people are typing...';
+  }
+});
+
+// ── Read receipts ───────────────────────────────────────────────────────
+// Send read receipt only after the message has been visible for 3 seconds,
+// so it reflects the user actually reading it, not just the window opening.
+let _lastReceiptEventId = null;
+let _readReceiptTimer   = null;
+function scheduleReadReceipt() {
+  clearTimeout(_readReceiptTimer);
+  if (document.hidden || !activeRoomId) return;
+  _readReceiptTimer = setTimeout(() => {
+    const bubbles = elMessages.children;
+    if (!bubbles.length) return;
+    const last = bubbles[bubbles.length - 1];
+    const evId = last._matrixEvent?.event_id;
+    if (evId && evId !== _lastReceiptEventId) {
+      _lastReceiptEventId = evId;
+      window.bracerChat.sendReadReceipt(activeRoomId, evId).catch(() => {});
+    }
+  }, 3000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearTimeout(_readReceiptTimer);
+  } else {
+    scheduleReadReceipt();
+  }
+});
+window.addEventListener('focus', () => scheduleReadReceipt());
 
 // Right-click context menu on the compose textarea (Cut / Copy / Paste / Select All)
 elMsgInput.addEventListener('contextmenu', (e) => {

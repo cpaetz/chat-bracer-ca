@@ -27,6 +27,7 @@ class MatrixClient {
     this.running          = false;
     this._initialSyncDone = false;
     this._messageHandlers = [];
+    this._typingHandlers  = [];
     this._txnCounter      = Date.now();
   }
 
@@ -103,6 +104,23 @@ class MatrixClient {
       `/_matrix/client/v3/profile/${uid}/displayname`,
       { displayname: displayName }
     );
+  }
+
+  /** Send typing notification. timeout=0 stops typing. */
+  async sendTyping(roomId, typing, timeoutMs = 15000) {
+    const rid = encodeURIComponent(roomId);
+    const uid = encodeURIComponent(this.userId);
+    await this._request('PUT', `/_matrix/client/v3/rooms/${rid}/typing/${uid}`, {
+      typing,
+      timeout: typing ? timeoutMs : undefined
+    });
+  }
+
+  /** Send a read receipt for an event. */
+  async sendReadReceipt(roomId, eventId) {
+    const rid = encodeURIComponent(roomId);
+    const eid = encodeURIComponent(eventId);
+    await this._request('POST', `/_matrix/client/v3/rooms/${rid}/receipt/m.read/${eid}`, {});
   }
 
   /** Send a poll response (vote) for a given poll event. */
@@ -334,6 +352,11 @@ class MatrixClient {
     this._messageHandlers.push(handler);
   }
 
+  /** Register a callback for typing updates. Called with { roomId, userIds }. */
+  onTyping(handler) {
+    this._typingHandlers.push(handler);
+  }
+
   /** Start the sync loop (non-blocking). */
   startSync() {
     this.running = true;
@@ -348,7 +371,10 @@ class MatrixClient {
   async _syncLoop() {
     // Compact filter: only timeline events, limit history on first sync
     const filter = encodeURIComponent(JSON.stringify({
-      room: { timeline: { limit: 20 } }
+      room: {
+        timeline: { limit: 20 },
+        ephemeral: { types: ['m.typing'] }
+      }
     }));
 
     while (this.running) {
@@ -391,6 +417,22 @@ class MatrixClient {
                 // Polls show for everyone including own sender
                 for (const handler of this._messageHandlers) {
                   handler({ roomId, event });
+                }
+              }
+            }
+          }
+        }
+
+        // Emit typing indicators (ephemeral events, available on every sync)
+        if (data.rooms && data.rooms.join) {
+          for (const [roomId, roomData] of Object.entries(data.rooms.join)) {
+            const ephemeral = roomData.ephemeral?.events || [];
+            for (const ev of ephemeral) {
+              if (ev.type === 'm.typing') {
+                // Filter out own user from typing list
+                const userIds = (ev.content?.user_ids || []).filter(u => u !== this.userId);
+                for (const handler of this._typingHandlers) {
+                  handler({ roomId, userIds });
                 }
               }
             }

@@ -5,7 +5,7 @@
 !macro customInstall
 
   ; Set HKLM Run key so the app auto-starts for every user that logs in
-  WriteRegStr HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Bracer Chat" "$\"$INSTDIR\Bracer Chat.exe$\""
+  WriteRegStr HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Bracer Chat" "$\"$INSTDIR\Bracer Chat.exe$\" --startup"
 
   ; Grant BUILTIN\Users modify rights on app.asar so the in-app updater can
   ; replace it as the logged-in user without elevation or a SYSTEM task.

@@ -286,6 +286,18 @@ mark.search-highlight.active {
   text-align: right;
 }
 
+/* ── Typing indicator ───────────────────────────────────────────────────── */
+#typing-indicator {
+  padding      : 2px 12px;
+  font-size    : 11px;
+  color        : var(--color-muted);
+  font-style   : italic;
+  min-height   : 0;
+  line-height  : 16px;
+  flex-shrink  : 0;
+}
+#typing-indicator:empty { display: none; }
+
 /* ── Compose area ───────────────────────────────────────────────────────── */
 #compose {
   display       : flex;

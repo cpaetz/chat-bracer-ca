@@ -39,7 +39,7 @@ const { readSession }                    = require('./credentials');
 const { getMachineInfo, getWindowsUser, getWindowsUserAsync } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray, setTrayBadge, clearTrayBadge } = require('./tray');
-const { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow } = require('./window');
+const { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow, setAlwaysOnTop } = require('./window');
 const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
 const { checkAndUpdate, manualCheckForUpdate }                = require('./updater');
 const { startLogUploader }                                    = require('./logUploader');
@@ -60,7 +60,6 @@ const WDA_NONE               = 0x00000000;
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const HOMESERVER_URL    = 'https://chat.bracer.ca';
-const FIRST_LAUNCH_PATH = 'C:\\ProgramData\\BracerChat\\first_launch_done';
 const MAX_FILE_BYTES    = 100 * 1024 * 1024; // 100 MB — matches server upload limit
 
 // ── App-level flags ────────────────────────────────────────────────────────
@@ -103,7 +102,7 @@ function readWindowPrefs() {
   } catch (err) {
     console.error('[BracerChat] Failed to read window prefs:', err.message);
   }
-  return { pinned: false };
+  return { pinned: false, alwaysOnTop: true };
 }
 
 function saveWindowPrefs(prefs) {
@@ -135,11 +134,11 @@ function boundsVisibleOnAnyDisplay(b) {
   });
 }
 
-function showAndResetIfNeeded(alwaysOnTop = false) {
+function showAndResetIfNeeded() {
   const win = getWindow();
+  const prefs = readWindowPrefs();
   let bounds = null;
   if (win && !win.isDestroyed() && !win.isVisible()) {
-    const prefs = readWindowPrefs();
     if (prefs.pinned && prefs.bounds && boundsVisibleOnAnyDisplay(prefs.bounds)) {
       bounds = prefs.bounds;
     } else if (!prefs.pinned) {
@@ -149,7 +148,8 @@ function showAndResetIfNeeded(alwaysOnTop = false) {
       bounds = getDefaultBounds();
     }
   }
-  showWindow(alwaysOnTop, bounds);
+  const onTop = prefs.alwaysOnTop !== undefined ? prefs.alwaysOnTop : true;
+  showWindow(onTop, bounds);
 }
 
 // ── Badge rendering ────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ app.on('ready', async () => {
   // relaunch) pass flags and should be silently ignored.
   app.on('second-instance', (_event, argv) => {
     if (argv.includes('--watchdog') || argv.includes('--startup')) return;
-    showAndResetIfNeeded(false);
+    showAndResetIfNeeded();
   });
 
   // Close button → hide to tray (not quit)
@@ -293,12 +293,13 @@ app.on('ready', async () => {
   // so those start hidden in the tray. Any other launch shows the window immediately.
   const isSilentLaunch = process.argv.includes('--startup') || process.argv.includes('--watchdog');
   if (!app.isPackaged || !isSilentLaunch) {
-    showAndResetIfNeeded(false);
+    showAndResetIfNeeded();
   }
 
+  const initialPrefs = readWindowPrefs();
   createTray(
     path.join(__dirname, '..', 'assets', 'icon.ico'),
-    () => showAndResetIfNeeded(false),
+    () => showAndResetIfNeeded(),
     () => {
       isAppQuitting = true;
       if (matrixClient) matrixClient.stopSync();
@@ -330,7 +331,15 @@ app.on('ready', async () => {
       }).then(({ response }) => {
         if (response === 0) manualCheckForUpdate(session.access_token);
       });
-    }
+    },
+    (key, value) => {
+      // Setting changed from tray menu — persist and apply immediately
+      const prefs = readWindowPrefs();
+      prefs[key] = value;
+      saveWindowPrefs(prefs);
+      if (key === 'alwaysOnTop') setAlwaysOnTop(value);
+    },
+    { alwaysOnTop: initialPrefs.alwaysOnTop !== undefined ? initialPrefs.alwaysOnTop : true }
   );
 
   // 4. Connect to Matrix ─────────────────────────────────────────────────
@@ -359,42 +368,69 @@ app.on('ready', async () => {
 
   // 5. Listen for new messages → popup ───────────────────────────────────
   matrixClient.onMessage(({ roomId, event }) => {
-    // Forward all messages to the renderer for display
+    // Hidden staff commands — handled silently, never shown in the chat
+    const msgBody = event.type === 'm.room.message' ? event.content?.body?.trim().toLowerCase() : null;
+    if (msgBody === '!alwaysontop' && event.sender !== session.user_id) {
+      console.log('[BracerChat] !alwaysontop received from', event.sender);
+      showAndResetIfNeeded();
+      setAlwaysOnTop(true);
+      // Revert to the user's saved preference after 15 minutes
+      setTimeout(() => {
+        const savedPrefs = readWindowPrefs();
+        const savedOnTop = savedPrefs.alwaysOnTop !== undefined ? savedPrefs.alwaysOnTop : true;
+        setAlwaysOnTop(savedOnTop);
+      }, 15 * 60 * 1000);
+      return; // Don't render or pop up for this command
+    }
+
+    // !machineinfo — reply silently, don't show to client
+    if (msgBody === '!machineinfo' && event.sender !== session.user_id) {
+      console.log('[BracerChat] !machineinfo received from', event.sender);
+      postMachineInfo().catch(err =>
+        console.error('[BracerChat] !machineinfo reply failed:', err.message));
+      return;
+    }
+
+    // Forward all other messages to the renderer for display
     sendToRenderer('new-message', { roomId, event });
 
-    // Never pop up for messages sent by this device — avoids the window
-    // flashing every time the user sends a message and it comes back via sync.
+    // Never pop up for messages sent by this device
     if (event.sender === session.user_id) return;
 
     // Popup for machine room and broadcast rooms
     const isBroadcast = roomId === session.room_id_broadcast || roomId === session.room_id_company;
     if (isBroadcast) console.log('[BracerChat] broadcast event type:', event.type, 'roomId:', roomId);
     if (roomId === session.room_id_machine || isBroadcast) {
-      showAndResetIfNeeded(true); // alwaysOnTop for 5 s; resets to home if unpinned + hidden
-      sendToRenderer('focus-message', { eventId: event.event_id });
-      flashWindow(true); // Flash taskbar button until user focuses the window
+      const prefs = readWindowPrefs();
+      const onTop = prefs.alwaysOnTop !== undefined ? prefs.alwaysOnTop : true;
+      if (onTop) {
+        // Always-on-top mode: show the window immediately
+        showAndResetIfNeeded();
+        sendToRenderer('focus-message', { eventId: event.event_id });
+      } else if (!winInstance.isVisible()) {
+        // Not-on-top mode: show window behind other apps so the taskbar
+        // button exists for flashing and badge overlay. Don't steal focus.
+        winInstance.showInactive();
+      }
+      // Always flash taskbar and update badges for unread messages
+      flashWindow(true);
       if (!winInstance.isFocused()) {
         updateBadges(++unreadCount);
       }
     }
   });
 
+  // Forward typing indicators to renderer
+  matrixClient.onTyping(({ roomId, userIds }) => {
+    sendToRenderer('typing-update', { roomId, userIds });
+  });
+
   matrixClient.startSync();
 
-  // 6. First-launch info post ────────────────────────────────────────────
-  if (!fs.existsSync(FIRST_LAUNCH_PATH)) {
-    try {
-      await postMachineInfo();
-      fs.writeFileSync(FIRST_LAUNCH_PATH, new Date().toISOString());
-    } catch (err) {
-      console.error('[BracerChat] First-launch post failed:', err.message);
-    }
-  }
-
-  // 7. Windows user polling ──────────────────────────────────────────────
+  // 6. Windows user polling ──────────────────────────────────────────────
   userPollInterval = setInterval(checkUserChange, 60_000);
 
-  // 8. Self-update check ─────────────────────────────────────────────────
+  // 7. Self-update check ─────────────────────────────────────────────────
   // First check: 30s base + 0–60min jitter so machines don't all hit the
   // update server simultaneously after a fleet restart.
   // Recurring check: every 4 hours so long-running machines get updates
@@ -407,7 +443,7 @@ app.on('ready', async () => {
     setInterval(() => checkAndUpdate(session.access_token), UPDATE_INTERVAL_MS);
   }, updateJitterMs);
 
-  // 9. Log uploader ──────────────────────────────────────────────────────
+  // 8. Log uploader ──────────────────────────────────────────────────────
   // Uploads error log on startup (if changed) and every hour thereafter.
   startLogUploader(session.access_token);
 });
@@ -428,17 +464,18 @@ app.on('child-process-gone', (_event, details) => {
   console.error('[BracerChat] Child process gone — type:', details.type, '| reason:', details.reason, '| exit code:', details.exitCode);
 });
 
-// ── First-launch info post ─────────────────────────────────────────────────
+// ── Machine info command ───────────────────────────────────────────────────
 
 async function postMachineInfo() {
-  const { hostname, windowsUser, serial, ip, mac } = machineInfo;
+  const { hostname, serial, ip, mac } = machineInfo;
   const text = [
-    '**Machine registered with Bracer Chat**',
+    '**Machine Info**',
     `Hostname: ${hostname}`,
-    `User:     ${windowsUser}`,
+    `User:     ${currentUser}`,
     `Serial:   ${serial}`,
     `IP:       ${ip}`,
-    `MAC:      ${mac}`
+    `MAC:      ${mac}`,
+    `Version:  ${app.getVersion()}`
   ].join('\n');
   await matrixClient.sendMessage(session.room_id_machine, text);
 }
@@ -489,6 +526,14 @@ ipcMain.handle('send-reply', async (_event, roomId, text, replyToEvent) => {
 
 ipcMain.handle('send-poll-response', async (_event, roomId, pollEventId, answerId) => {
   await matrixClient.sendPollResponse(roomId, pollEventId, answerId);
+});
+
+ipcMain.handle('send-typing', async (_event, roomId, typing) => {
+  await matrixClient.sendTyping(roomId, typing);
+});
+
+ipcMain.handle('send-read-receipt', async (_event, roomId, eventId) => {
+  await matrixClient.sendReadReceipt(roomId, eventId);
 });
 
 ipcMain.handle('open-file-dialog', async () => {
