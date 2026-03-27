@@ -16,6 +16,7 @@
  */
 
 const https    = require('https');
+const crypto   = require('crypto');
 const fs       = require('fs');
 const origFs   = require('original-fs');  // Bypass Electron ASAR interception for raw file I/O
 const path     = require('path');
@@ -26,8 +27,41 @@ const { app, dialog } = require('electron');
 const CHECK_URL    = 'https://chat.bracer.ca/api/update/check';
 const DOWNLOAD_URL = 'https://chat.bracer.ca/api/update/download';
 const ASAR_URL     = 'https://chat.bracer.ca/api/update/asar';
+
+// Ed25519 public key for verifying update signatures.
+// Private key is stored offline in 1Password — never on the server.
+const SIGNING_PUBLIC_KEY = (() => {
+  const rawPub    = Buffer.from('4PYHU8mjh0VHqlgzRDubeo18athzya6Zbb/qTEvZ0pM=', 'base64');
+  const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');  // SPKI wrapper for Ed25519
+  return crypto.createPublicKey({ key: Buffer.concat([spkiPrefix, rawPub]), format: 'der', type: 'spki' });
+})();
 const APP_EXE      = 'C:\\Program Files\\Bracer Chat\\Bracer Chat.exe';
 const ASAR_DST     = 'C:\\Program Files\\Bracer Chat\\resources\\app.asar';
+
+// ── Signature verification ───────────────────────────────────────────────────
+
+/**
+ * Verifies an Ed25519 signature against a file's contents.
+ * Returns true if the signature is valid, false otherwise.
+ */
+function verifySignature(filePath, signatureBase64) {
+  const fileData  = origFs.readFileSync(filePath);
+  const signature = Buffer.from(signatureBase64, 'base64');
+  return crypto.verify(null, fileData, SIGNING_PUBLIC_KEY, signature);
+}
+
+/**
+ * Downloads the .sig file for a given update URL.
+ * The server serves signatures at the same URL with ?sig=1 appended.
+ */
+async function downloadSignature(url, accessToken) {
+  const sigUrl = url + (url.includes('?') ? '&' : '?') + 'sig=1';
+  const { status, body } = await httpsGet(sigUrl, { Authorization: `Bearer ${accessToken}` });
+  if (status !== 200) throw new Error(`Signature download failed: HTTP ${status}`);
+  const sig = JSON.parse(body).signature;
+  if (!sig) throw new Error('Signature missing from server response');
+  return sig;
+}
 
 // ── Version comparison ──────────────────────────────────────────────────────
 
@@ -157,9 +191,17 @@ async function downloadAndInstallAsar(accessToken) {
   const asarTmp = path.join(tmpDir, 'BracerChatUpdate.asar');
   const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
 
+  // Download ASAR and its signature, then verify before proceeding
+  const signature = await downloadSignature(ASAR_URL, accessToken);
   await downloadFile(ASAR_URL, accessToken, asarTmp);
   console.log('[Updater] ASAR download complete (~' +
-    Math.round(origFs.statSync(asarTmp).size / 1024 / 1024) + ' MB). Queuing replace...');
+    Math.round(origFs.statSync(asarTmp).size / 1024 / 1024) + ' MB). Verifying signature...');
+
+  if (!verifySignature(asarTmp, signature)) {
+    origFs.unlinkSync(asarTmp);
+    throw new Error('ASAR signature verification failed — update rejected');
+  }
+  console.log('[Updater] Signature verified. Queuing replace...');
 
   const srcEsc    = asarTmp.replace(/'/g, "''");
   const dstEsc    = ASAR_DST.replace(/'/g, "''");
@@ -234,8 +276,16 @@ async function downloadAndInstallFull(accessToken) {
   const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
   const TASK    = 'BracerChatUpdate';
 
+  // Download installer and its signature, then verify before proceeding
+  const signature = await downloadSignature(DOWNLOAD_URL, accessToken);
   await downloadFile(DOWNLOAD_URL, accessToken, exePath);
-  console.log('[Updater] Full installer download complete. Queuing SYSTEM install task...');
+  console.log('[Updater] Full installer download complete. Verifying signature...');
+
+  if (!verifySignature(exePath, signature)) {
+    origFs.unlinkSync(exePath);
+    throw new Error('Installer signature verification failed — update rejected');
+  }
+  console.log('[Updater] Signature verified. Queuing SYSTEM install task...');
 
   const exeEsc = exePath.replace(/'/g, "''");
   const ps1Lines = [
@@ -257,7 +307,17 @@ async function downloadAndInstallFull(accessToken) {
 
 async function checkAndUpdate(accessToken) {
   try {
-    const { status, body } = await httpsGet(CHECK_URL);
+    const { status, body } = await httpsGet(CHECK_URL, { Authorization: `Bearer ${accessToken}` });
+    if (status === 429) {
+      // Rate limited — parse retry_after and schedule next check
+      try {
+        const { retry_after } = JSON.parse(body);
+        const retryMs = (retry_after || 1800) * 1000;
+        console.warn(`[Updater] Rate limited. Retrying in ${Math.round(retryMs / 60000)} min.`);
+        setTimeout(() => checkAndUpdate(accessToken), retryMs);
+      } catch { /* ignore parse error */ }
+      return;
+    }
     if (status !== 200) {
       console.warn('[Updater] Version check returned', status);
       return;
@@ -286,7 +346,14 @@ async function checkAndUpdate(accessToken) {
 
 async function manualCheckForUpdate(accessToken) {
   try {
-    const { status, body } = await httpsGet(CHECK_URL);
+    const { status, body } = await httpsGet(CHECK_URL, { Authorization: `Bearer ${accessToken}` });
+    if (status === 429) {
+      let retryMin = 30;
+      try { retryMin = Math.round((JSON.parse(body).retry_after || 1800) / 60); } catch {}
+      dialog.showMessageBox({ type: 'warning', title: 'Rate Limited',
+        message: `Too many requests. Please try again in ${retryMin} minutes.`, buttons: ['OK'] });
+      return;
+    }
     if (status !== 200) {
       dialog.showMessageBox({ type: 'warning', title: 'Update Check Failed',
         message: 'Could not reach the update server.', buttons: ['OK'] });

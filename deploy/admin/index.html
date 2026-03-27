@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bracer Chat Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #f4f7f6; color: #333; min-height: 100vh;
+  }
+
+  .header {
+    background: #2099c6; color: #fff; padding: 16px 24px;
+    display: flex; align-items: center; gap: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  }
+  .header img { width: 36px; height: 36px; border-radius: 50%; background: #fff; padding: 4px; }
+  .header h1 { font-size: 20px; font-weight: 700; flex: 1; }
+  .header .user-info { font-size: 13px; opacity: 0.9; }
+  .header button {
+    background: rgba(255,255,255,0.2); border: none; color: #fff; padding: 8px 16px;
+    border-radius: 6px; cursor: pointer; font-size: 13px; font-family: inherit;
+  }
+  .header button:hover { background: rgba(255,255,255,0.3); }
+
+  .login-page {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 80vh; gap: 24px; padding: 32px;
+  }
+  .login-page img { width: 80px; height: 80px; }
+  .login-page h2 { font-size: 24px; color: #333; }
+  .login-page p { color: #666; font-size: 14px; }
+  .login-buttons { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .login-btn {
+    display: flex; align-items: center; gap: 10px; padding: 12px 24px;
+    border: 1px solid #e0e0e0; border-radius: 8px; background: #fff;
+    cursor: pointer; font-size: 14px; font-family: inherit; color: #333;
+    transition: box-shadow 0.2s, border-color 0.2s; text-decoration: none;
+  }
+  .login-btn:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-color: #2099c6; }
+  .login-btn svg { width: 20px; height: 20px; }
+
+  .dashboard { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+  .stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card {
+    flex: 1; min-width: 200px; background: #fff; border-radius: 10px;
+    padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    cursor: pointer; transition: box-shadow 0.2s, transform 0.15s;
+  }
+  .stat-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.12); transform: translateY(-2px); }
+  .stat-card .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .value { font-size: 32px; font-weight: 700; color: #2099c6; margin: 4px 0; }
+  .stat-card .sub { font-size: 13px; color: #666; }
+
+  .section {
+    background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  .section h2 {
+    font-size: 16px; font-weight: 700; color: #333; margin-bottom: 16px;
+    padding-bottom: 8px; border-bottom: 1px solid #f0f0f0;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section h2 .count-badge {
+    background: #2099c6; color: #fff; font-size: 11px; padding: 2px 8px;
+    border-radius: 10px; font-weight: 600;
+  }
+
+  .holiday-row { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+  .toggle { position: relative; width: 48px; height: 26px; cursor: pointer; }
+  .toggle input { display: none; }
+  .toggle .slider {
+    position: absolute; inset: 0; background: #ccc; border-radius: 13px; transition: background 0.3s;
+  }
+  .toggle .slider::after {
+    content: ''; position: absolute; width: 20px; height: 20px;
+    background: #fff; border-radius: 50%; top: 3px; left: 3px;
+    transition: transform 0.3s; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  }
+  .toggle input:checked + .slider { background: #f8941b; }
+  .toggle input:checked + .slider::after { transform: translateX(22px); }
+  .holiday-status { font-size: 14px; font-weight: 600; }
+  .holiday-status.on { color: #f8941b; }
+  .holiday-status.off { color: #999; }
+
+  textarea.field {
+    width: 100%; padding: 10px 14px; border: 1px solid #e0e0e0; border-radius: 6px;
+    font-size: 14px; font-family: inherit; resize: vertical; min-height: 60px;
+    outline: none; transition: border-color 0.2s;
+  }
+  textarea.field:focus { border-color: #2099c6; }
+  select.field {
+    padding: 8px 12px; border: 1px solid #e0e0e0; border-radius: 6px;
+    font-size: 13px; font-family: inherit; outline: none; min-width: 200px;
+  }
+
+  .btn {
+    padding: 8px 20px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-family: inherit; font-weight: 600; transition: background 0.2s;
+  }
+  .btn-primary { background: #2099c6; color: #fff; }
+  .btn-primary:hover { background: #187aa0; }
+  .btn-orange { background: #f8941b; color: #fff; }
+  .btn-orange:hover { background: #d67d14; }
+  .btn-sm { padding: 6px 14px; font-size: 12px; }
+  .btn-ghost { background: none; border: 1px solid #e0e0e0; color: #666; }
+  .btn-ghost:hover { background: #f4f7f6; border-color: #ccc; }
+
+  .broadcast-controls { display: flex; gap: 12px; align-items: flex-end; margin-top: 12px; }
+
+  .company-grid { display: flex; flex-direction: column; gap: 4px; }
+  .company-row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+    border-radius: 8px; background: #f9fafb; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .company-row:hover { background: #edf2f0; }
+  .company-name { flex: 1; font-weight: 600; font-size: 14px; }
+  .company-count { font-size: 13px; color: #666; min-width: 90px; text-align: right; }
+  .company-actions { display: flex; gap: 6px; }
+  .online-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; flex-shrink: 0; }
+  .online-dot.on { background: #22c55e; }
+  .online-dot.off { background: #ccc; }
+  .chevron { font-size: 12px; color: #999; transition: transform 0.2s; }
+  .chevron.open { transform: rotate(90deg); }
+
+  .machine-list { display: none; padding: 4px 0 8px 16px; }
+  .machine-list.open { display: block; }
+  .machine-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border-radius: 6px; cursor: pointer; transition: background 0.15s;
+    font-size: 13px;
+  }
+  .machine-item:hover { background: #f0f4f3; }
+  .machine-hostname { font-weight: 600; flex: 1; }
+  .machine-meta { font-size: 11px; color: #999; }
+  .machine-links { display: flex; gap: 4px; }
+  .machine-links a {
+    font-size: 11px; color: #2099c6; text-decoration: none; padding: 2px 8px;
+    border: 1px solid #d0e8f0; border-radius: 4px; transition: background 0.15s;
+  }
+  .machine-links a:hover { background: #e8f4f8; }
+
+  /* Detail modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    z-index: 1000; align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #fff; border-radius: 12px; padding: 24px; width: 90%;
+    max-width: 500px; max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  }
+  .modal h3 { font-size: 18px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .modal .close-btn {
+    margin-left: auto; background: none; border: none; font-size: 20px;
+    cursor: pointer; color: #999; padding: 4px;
+  }
+  .modal .close-btn:hover { color: #333; }
+  .detail-row { display: flex; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+  .detail-label { font-size: 12px; color: #888; width: 120px; flex-shrink: 0; text-transform: uppercase; }
+  .detail-value { font-size: 14px; flex: 1; }
+  .detail-actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Online filter section */
+  .filter-bar {
+    display: none; padding: 12px 16px; background: #e8f4f8; border-radius: 8px;
+    margin-bottom: 16px; align-items: center; gap: 12px;
+  }
+  .filter-bar.active { display: flex; }
+  .filter-bar span { font-size: 13px; color: #2099c6; font-weight: 600; }
+  .filter-bar .clear-filter {
+    margin-left: auto; background: none; border: none; color: #999;
+    cursor: pointer; font-size: 12px; text-decoration: underline;
+  }
+
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; background: #333; color: #fff;
+    padding: 12px 20px; border-radius: 8px; font-size: 14px; z-index: 9999;
+    display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  }
+  .toast.success { background: #22c55e; }
+  .toast.error { background: #ef4444; }
+
+  .loading { text-align: center; padding: 40px; color: #999; font-size: 14px; }
+  .spinner {
+    display: inline-block; width: 24px; height: 24px;
+    border: 3px solid #e0e0e0; border-top-color: #2099c6;
+    border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 640px) {
+    .stats { flex-direction: column; }
+    .broadcast-controls { flex-direction: column; align-items: stretch; }
+    .header { flex-wrap: wrap; }
+    .modal { width: 95%; margin: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login-page" class="login-page">
+  <img src="/widget/bracer-icon.png" alt="Bracer">
+  <h2>Bracer Chat Dashboard</h2>
+  <p>Sign in with your Bracer account to manage chat settings.</p>
+  <div class="login-buttons">
+    <a href="/api/admin/login?provider=google" class="login-btn">
+      <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      Sign in with Google
+    </a>
+    <a href="/api/admin/login?provider=microsoft" class="login-btn">
+      <svg viewBox="0 0 24 24"><rect fill="#F25022" x="1" y="1" width="10" height="10"/><rect fill="#7FBA00" x="13" y="1" width="10" height="10"/><rect fill="#00A4EF" x="1" y="13" width="10" height="10"/><rect fill="#FFB900" x="13" y="13" width="10" height="10"/></svg>
+      Sign in with Microsoft
+    </a>
+  </div>
+</div>
+
+<div id="dashboard-page" style="display:none;">
+  <div class="header">
+    <img src="/widget/bracer-icon.png" alt="Bracer">
+    <h1>Bracer Chat Dashboard</h1>
+    <span class="user-info" id="user-display"></span>
+    <button onclick="doLogout()">Sign Out</button>
+  </div>
+
+  <div class="dashboard" id="dashboard-content">
+    <div class="loading" id="loading"><div class="spinner"></div><br>Loading dashboard...</div>
+
+    <div id="dash-loaded" style="display:none;">
+      <div class="stats">
+        <div class="stat-card" onclick="scrollToSection('company-section')">
+          <div class="label">Total Machines</div>
+          <div class="value" id="stat-total">0</div>
+          <div class="sub">Click to view all</div>
+        </div>
+        <div class="stat-card" onclick="filterOnline()">
+          <div class="label">Online Now</div>
+          <div class="value" id="stat-online" style="color:#22c55e;">0</div>
+          <div class="sub">Click to filter online</div>
+        </div>
+        <div class="stat-card" onclick="scrollToSection('company-section')">
+          <div class="label">Companies</div>
+          <div class="value" id="stat-companies">0</div>
+          <div class="sub">Click to view</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Holiday Mode</h2>
+        <div class="holiday-row">
+          <label class="toggle">
+            <input type="checkbox" id="holiday-toggle" onchange="toggleHoliday()">
+            <span class="slider"></span>
+          </label>
+          <span class="holiday-status" id="holiday-label">Off</span>
+        </div>
+        <textarea class="field" id="holiday-message"
+          placeholder="e.g. We're closed Dec 23 - Jan 2 for the holidays."></textarea>
+        <div style="margin-top:10px;">
+          <button class="btn btn-primary" onclick="saveHoliday()">Save Message</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Broadcast Message</h2>
+        <textarea class="field" id="broadcast-message" style="min-height:80px;"
+          placeholder="Type a message to send to clients..."></textarea>
+        <div class="broadcast-controls">
+          <select class="field" id="broadcast-target">
+            <option value="all">All Clients (Bracer Broadcast)</option>
+          </select>
+          <button class="btn btn-orange" onclick="sendBroadcast()">Send Broadcast</button>
+        </div>
+      </div>
+
+      <div class="section" id="company-section">
+        <h2>Clients <span class="count-badge" id="client-count-badge">0</span></h2>
+        <input type="text" class="field" id="client-search" placeholder="Search by company or hostname..."
+          oninput="handleSearch()" style="margin-bottom:12px;">
+        <div class="filter-bar" id="filter-bar">
+          <span id="filter-text">Showing online machines only</span>
+          <button class="clear-filter" onclick="clearFilter()">Show all</button>
+        </div>
+        <div class="company-grid" id="company-list"></div>
+        <div id="no-results" style="display:none;text-align:center;padding:20px;color:#999;font-size:14px;">
+          No matching clients found.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  var dashData = null;
+  var filterMode = null; // null or 'online'
+  var searchQuery = '';
+  var ELEMENT_URL = 'https://chat.bracer.ca';
+
+  function init() {
+    fetch('/api/admin/status', { credentials: 'same-origin' })
+      .then(function(r) {
+        if (r.status === 401) { showLogin(); return null; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        if (!data) return;
+        dashData = data;
+        showDashboard(data);
+      })
+      .catch(function() { showLogin(); });
+  }
+
+  function showLogin() {
+    document.getElementById('login-page').style.display = 'flex';
+    document.getElementById('dashboard-page').style.display = 'none';
+  }
+
+  function showDashboard(data) {
+    document.getElementById('login-page').style.display = 'none';
+    document.getElementById('dashboard-page').style.display = 'block';
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('dash-loaded').style.display = 'block';
+
+    var name = data.user_id.replace(/@(.+):.*/, '$1').replace(/\./g, ' ');
+    name = name.charAt(0).toUpperCase() + name.slice(1);
+    document.getElementById('user-display').textContent = name;
+
+    document.getElementById('stat-total').textContent = data.total_machines;
+    document.getElementById('stat-online').textContent = data.total_online;
+    document.getElementById('stat-companies').textContent = Object.keys(data.companies).length;
+    document.getElementById('client-count-badge').textContent = data.total_machines;
+
+    document.getElementById('holiday-toggle').checked = data.holiday.enabled;
+    document.getElementById('holiday-message').value = data.holiday.message || '';
+    updateHolidayLabel(data.holiday.enabled);
+
+    var select = document.getElementById('broadcast-target');
+    select.innerHTML = '<option value="all">All Clients (Bracer Broadcast)</option>';
+    Object.keys(data.companies).sort().forEach(function(name) {
+      var co = data.companies[name];
+      if (co.room_id) {
+        var opt = document.createElement('option');
+        opt.value = co.room_id;
+        opt.textContent = name + ' (' + co.online_count + '/' + co.machines.length + ' online)';
+        select.appendChild(opt);
+      }
+    });
+
+    renderCompanies(data);
+  }
+
+  function renderCompanies(data) {
+    var list = document.getElementById('company-list');
+    list.innerHTML = '';
+    var filtered = 0;
+    var anyResults = false;
+
+    Object.keys(data.companies).sort().forEach(function(coName) {
+      var co = data.companies[coName];
+      var machines = co.machines;
+
+      if (filterMode === 'online') {
+        machines = machines.filter(function(m) { return m.online; });
+      }
+
+      // Apply search filter
+      if (searchQuery) {
+        var q = searchQuery.toLowerCase();
+        var companyMatch = coName.toLowerCase().indexOf(q) >= 0;
+        if (!companyMatch) {
+          // Filter to machines that match the search
+          machines = machines.filter(function(m) {
+            return m.hostname.toLowerCase().indexOf(q) >= 0;
+          });
+        }
+        if (machines.length === 0) return;
+      }
+
+      if (machines.length === 0) return;
+      anyResults = true;
+      filtered += machines.length;
+
+      var wrapper = document.createElement('div');
+
+      var header = document.createElement('div');
+      header.className = 'company-row';
+      header.innerHTML =
+        '<span class="chevron" id="chev-' + esc(coName) + '">&#9654;</span>' +
+        '<span class="online-dot ' + (co.online_count > 0 ? 'on' : 'off') + '"></span>' +
+        '<span class="company-name">' + esc(coName) + '</span>' +
+        '<span class="company-count">' + co.online_count + '/' + co.machines.length + ' online</span>' +
+        '<div class="company-actions">' +
+          (co.room_id ? '<a href="' + ELEMENT_URL + '/#/room/' + co.room_id + '" target="_blank" class="btn btn-sm btn-ghost" title="Open in Element" onclick="event.stopPropagation()">Open Room</a>' : '') +
+        '</div>';
+
+      var machineDiv = document.createElement('div');
+      machineDiv.className = 'machine-list';
+      machineDiv.id = 'machines-' + esc(coName);
+
+      machines.sort(function(a,b) { return a.hostname.localeCompare(b.hostname); }).forEach(function(m) {
+        var item = document.createElement('div');
+        item.className = 'machine-item';
+        var lastStr = m.last_seen ? timeAgo(m.last_seen) : 'Never';
+        item.innerHTML =
+          '<span class="online-dot ' + (m.online ? 'on' : 'off') + '"></span>' +
+          '<span class="machine-hostname">' + esc(m.hostname) + '</span>' +
+          '<span class="machine-meta">' + (m.online ? 'Online' : lastStr) + '</span>' +
+          '<div class="machine-links">' +
+            (m.machine_room ? '<a href="' + ELEMENT_URL + '/#/room/' + m.machine_room + '" target="_blank" onclick="event.stopPropagation()">Chat</a>' : '') +
+          '</div>';
+        item.onclick = function(e) {
+          if (e.target.tagName === 'A') return;
+          showMachineDetail(m);
+        };
+        machineDiv.appendChild(item);
+      });
+
+      header.onclick = function() {
+        machineDiv.classList.toggle('open');
+        var chev = document.getElementById('chev-' + esc(coName));
+        if (chev) chev.classList.toggle('open');
+      };
+
+      wrapper.appendChild(header);
+      wrapper.appendChild(machineDiv);
+      list.appendChild(wrapper);
+    });
+
+    if (filterMode === 'online') {
+      document.getElementById('filter-text').textContent = 'Showing ' + filtered + ' online machine' + (filtered !== 1 ? 's' : '');
+    }
+
+    // Show/hide no results message
+    document.getElementById('no-results').style.display = (!anyResults && searchQuery) ? 'block' : 'none';
+
+    // Auto-expand companies when searching
+    if (searchQuery) {
+      document.querySelectorAll('.machine-list').forEach(function(el) { el.classList.add('open'); });
+      document.querySelectorAll('.chevron').forEach(function(el) { el.classList.add('open'); });
+    }
+  }
+
+  function showMachineDetail(m) {
+    var created = m.created_at ? new Date(m.created_at * 1000).toLocaleDateString() : 'Unknown';
+    var lastSeen = m.last_seen ? new Date(m.last_seen).toLocaleString() : 'Never';
+
+    var html =
+      '<h3>' +
+        '<span class="online-dot ' + (m.online ? 'on' : 'off') + '" style="width:12px;height:12px;"></span>' +
+        esc(m.hostname) +
+        '<button class="close-btn" onclick="closeModal()">&times;</button>' +
+      '</h3>' +
+      '<div class="detail-row"><div class="detail-label">Status</div><div class="detail-value">' + (m.online ? '<span style="color:#22c55e;font-weight:600;">Online</span>' : '<span style="color:#999;">Offline</span>') + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">Company</div><div class="detail-value">' + esc(m.company) + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">Last Seen</div><div class="detail-value">' + lastSeen + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">Registered</div><div class="detail-value">' + created + '</div></div>' +
+      '<div class="detail-row"><div class="detail-label">User ID</div><div class="detail-value" style="font-size:12px;word-break:break-all;">' + esc(m.user_id) + '</div></div>' +
+      '<div class="detail-actions">';
+
+    if (m.machine_room) {
+      html += '<a href="' + ELEMENT_URL + '/#/room/' + m.machine_room + '" target="_blank" class="btn btn-sm btn-primary">Open Chat in Element</a>';
+    }
+    if (m.company_room) {
+      html += '<a href="' + ELEMENT_URL + '/#/room/' + m.company_room + '" target="_blank" class="btn btn-sm btn-ghost">Company Room</a>';
+    }
+    html += '</div>';
+
+    document.getElementById('modal-content').innerHTML = html;
+    document.getElementById('modal-overlay').classList.add('open');
+  }
+
+  function timeAgo(tsMs) {
+    var diff = Date.now() - tsMs;
+    var mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'Just now';
+    if (mins < 60) return mins + 'm ago';
+    var hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h ago';
+    var days = Math.floor(hrs / 24);
+    return days + 'd ago';
+  }
+
+  function updateHolidayLabel(enabled) {
+    var label = document.getElementById('holiday-label');
+    label.textContent = enabled ? 'On' : 'Off';
+    label.className = 'holiday-status ' + (enabled ? 'on' : 'off');
+  }
+
+  function esc(s) {
+    var d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+  }
+
+  function toast(msg, type) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ' + (type || '');
+    t.style.display = 'block';
+    setTimeout(function() { t.style.display = 'none'; }, 3000);
+  }
+
+  // Global functions
+  window.doLogout = function() {
+    fetch('/api/admin/logout', { method: 'POST', credentials: 'same-origin' })
+      .then(function() { location.reload(); });
+  };
+
+  window.toggleHoliday = function() {
+    var enabled = document.getElementById('holiday-toggle').checked;
+    updateHolidayLabel(enabled);
+    fetch('/api/admin/holiday', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled })
+    }).then(function(r) {
+      if (!r.ok) throw new Error();
+      toast(enabled ? 'Holiday mode ON' : 'Holiday mode OFF', 'success');
+    }).catch(function() { toast('Failed to update', 'error'); });
+  };
+
+  window.saveHoliday = function() {
+    var msg = document.getElementById('holiday-message').value;
+    var enabled = document.getElementById('holiday-toggle').checked;
+    fetch('/api/admin/holiday', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled, message: msg })
+    }).then(function(r) {
+      if (!r.ok) throw new Error();
+      toast('Holiday message saved', 'success');
+    }).catch(function() { toast('Failed to save', 'error'); });
+  };
+
+  window.sendBroadcast = function() {
+    var msg = document.getElementById('broadcast-message').value.trim();
+    var target = document.getElementById('broadcast-target').value;
+    if (!msg) { toast('Enter a message first', 'error'); return; }
+    if (!confirm('Send this broadcast message?')) return;
+    fetch('/api/admin/broadcast', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, target: target })
+    }).then(function(r) {
+      if (!r.ok) throw new Error();
+      document.getElementById('broadcast-message').value = '';
+      toast('Broadcast sent!', 'success');
+    }).catch(function() { toast('Failed to send broadcast', 'error'); });
+  };
+
+  window.handleSearch = function() {
+    searchQuery = (document.getElementById('client-search').value || '').trim();
+    renderCompanies(dashData);
+  };
+
+  window.scrollToSection = function(id) {
+    var el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  window.filterOnline = function() {
+    filterMode = 'online';
+    document.getElementById('filter-bar').classList.add('active');
+    renderCompanies(dashData);
+    scrollToSection('company-section');
+    // Auto-expand all
+    document.querySelectorAll('.machine-list').forEach(function(el) { el.classList.add('open'); });
+    document.querySelectorAll('.chevron').forEach(function(el) { el.classList.add('open'); });
+  };
+
+  window.clearFilter = function() {
+    filterMode = null;
+    document.getElementById('filter-bar').classList.remove('active');
+    renderCompanies(dashData);
+  };
+
+  window.closeModal = function(e) {
+    if (e && e.target !== document.getElementById('modal-overlay') && !e.target.classList.contains('close-btn')) return;
+    document.getElementById('modal-overlay').classList.remove('open');
+  };
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  init();
+})();
+</script>
+</body>
+</html>

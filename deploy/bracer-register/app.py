@@ -12,8 +12,11 @@ from collections import defaultdict
 from urllib.parse import quote as urlquote
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+import json
+
+from fastapi import FastAPI, HTTPException, Request, Depends, Cookie, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, validator
 
@@ -25,7 +28,19 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
+# CORS for website chat widget (bracer.ca embedding chat.bracer.ca)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://bracer.ca", "https://www.bracer.ca"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=False,
+)
+
 SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://localhost:8008")
+# Allow plaintext only for localhost (Synapse is on same machine); reject otherwise
+if not SYNAPSE_URL.startswith("https://") and "localhost" not in SYNAPSE_URL and "127.0.0.1" not in SYNAPSE_URL:
+    raise RuntimeError(f"SYNAPSE_URL must use HTTPS for non-localhost targets: {SYNAPSE_URL}")
 SYNAPSE_ADMIN_TOKEN = os.environ["SYNAPSE_ADMIN_TOKEN"]
 API_SECRET = os.environ["API_SECRET"]
 SERVER_NAME = os.environ.get("SERVER_NAME", "chat.bracer.ca")
@@ -39,8 +54,24 @@ RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_COOLDOWN = 1800  # 30 minutes cooldown after hitting limit
+RATE_LIMIT_AUTH_MAX = 60    # Higher limit for authenticated endpoints (update/logs)
+RATE_LIMIT_AUTH_WINDOW = 300  # 5-minute window for auth endpoints
 _rate_store: dict = defaultdict(list)
+_rate_store_auth: dict = defaultdict(list)  # Separate store for authenticated endpoints
+_rate_cooldown: dict = {}  # ip -> cooldown_expires_at
 _rate_lock = asyncio.Lock()
+
+# Endpoints that are public-facing and need tight rate limits
+_PUBLIC_RATE_PATHS = {"/api/register", "/api/companies", "/api/installer/claim", "/api/guest/start"}
+# Endpoints that are authenticated and can have higher limits
+_AUTH_RATE_PREFIXES = ("/api/update/", "/api/logs/", "/api/guest/heartbeat")
+
+# Auth failure tracking for helpdesk alerting
+AUTH_FAIL_THRESHOLD = 10      # failures per window before alerting
+AUTH_FAIL_WINDOW    = 300     # 5-minute window
+_auth_fail_store: dict = defaultdict(list)
+_auth_fail_alerted: dict = {}  # ip -> last alert time
 
 security = HTTPBearer()
 
@@ -82,17 +113,66 @@ class RegisterRequest(BaseModel):
         return v
 
 
+ALLOWED_ORIGINS = {"https://bracer.ca", "https://www.bracer.ca"}
+
+
+@app.middleware("http")
+async def guest_origin_check(request: Request, call_next):
+    """Validate Origin header on guest chat endpoints only."""
+    if request.url.path.startswith("/api/guest/"):
+        # Allow CORS preflight through
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        origin = request.headers.get("origin", "").lower()
+        if origin not in ALLOWED_ORIGINS:
+            logger.warning(f"Guest endpoint blocked: origin={origin!r} path={request.url.path} ip={request.client.host}")
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
-    if request.url.path in ("/api/register", "/api/companies", "/api/installer/claim"):
+    path = request.url.path
+    if path.startswith("/api/"):
         ip = request.client.host
         now = time.monotonic()
         async with _rate_lock:
-            _rate_store[ip] = [t for t in _rate_store[ip] if now - t < RATE_LIMIT_WINDOW]
-            if len(_rate_store[ip]) >= RATE_LIMIT_MAX:
-                logger.warning(f"Rate limit exceeded for {ip}")
-                return JSONResponse(status_code=429, content={"detail": "Too many requests"})
-            _rate_store[ip].append(now)
+            # Tiered rate limiting:
+            # - Public endpoints (register, guest/start, etc.): 5/min + 30-min cooldown
+            # - Authenticated endpoints (update, logs, heartbeat): 60/5min, no cooldown
+            if path in _PUBLIC_RATE_PATHS:
+                # Check cooldown first
+                if ip in _rate_cooldown and now < _rate_cooldown[ip]:
+                    retry_after = int(_rate_cooldown[ip] - now)
+                    logger.warning(f"Rate limit cooldown active for {ip} ({retry_after}s remaining)")
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "Too many requests", "retry_after": retry_after},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+                _rate_store[ip] = [t for t in _rate_store[ip] if now - t < RATE_LIMIT_WINDOW]
+                if len(_rate_store[ip]) >= RATE_LIMIT_MAX:
+                    _rate_cooldown[ip] = now + RATE_LIMIT_COOLDOWN
+                    logger.warning(f"Rate limit exceeded for {ip} — 30 min cooldown started")
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "Too many requests", "retry_after": RATE_LIMIT_COOLDOWN},
+                        headers={"Retry-After": str(RATE_LIMIT_COOLDOWN)},
+                    )
+                _rate_store[ip].append(now)
+
+            elif any(path.startswith(p) for p in _AUTH_RATE_PREFIXES):
+                # Higher limit for authenticated machine endpoints
+                _rate_store_auth[ip] = [t for t in _rate_store_auth[ip] if now - t < RATE_LIMIT_AUTH_WINDOW]
+                if len(_rate_store_auth[ip]) >= RATE_LIMIT_AUTH_MAX:
+                    logger.warning(f"Auth rate limit exceeded for {ip}")
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "Too many requests", "retry_after": 60},
+                        headers={"Retry-After": "60"},
+                    )
+                _rate_store_auth[ip].append(now)
+
     return await call_next(request)
 
 
@@ -605,7 +685,10 @@ async def installer_download(token: str):
     if time.time() > expires_at:
         raise HTTPException(status_code=410, detail="Token expired")
 
+    # Strict sanitisation — only allow safe chars in template substitutions
+    # to prevent NSIS/PowerShell injection via company name or token
     company_safe = re.sub(r"[^a-zA-Z0-9]", "-", company).strip("-")[:40]
+    company_display = re.sub(r"[^a-zA-Z0-9 &\-.,']", "", company).strip()[:128]
     token_short  = token[:12]
     exe_name     = f"BracerChatInstall-{company_safe}.exe"
 
@@ -616,7 +699,7 @@ async def installer_download(token: str):
 
     ps  = ps.replace("{{TOKEN}}", token)
     nsi = nsi.replace("{{EXE_NAME}}", exe_name)
-    nsi = nsi.replace("{{COMPANY}}", company)
+    nsi = nsi.replace("{{COMPANY}}", company_display)
     nsi = nsi.replace("{{TOKEN_SHORT}}", token_short)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -653,7 +736,62 @@ from datetime import datetime, timedelta
 LOG_STORE_DIR = "/opt/bracer-logs"
 
 
-async def _validate_machine_token(access_token: str):
+async def _track_auth_failure(ip: str):
+    """Track auth failures per IP. Opens a SuperOps ticket if threshold is crossed."""
+    now = time.monotonic()
+    async with _rate_lock:
+        _auth_fail_store[ip] = [t for t in _auth_fail_store[ip] if now - t < AUTH_FAIL_WINDOW]
+        _auth_fail_store[ip].append(now)
+        count = len(_auth_fail_store[ip])
+
+        if count >= AUTH_FAIL_THRESHOLD:
+            last_alert = _auth_fail_alerted.get(ip, 0)
+            if now - last_alert > 3600:  # max 1 alert per IP per hour
+                _auth_fail_alerted[ip] = now
+                logger.warning(f"Auth failure threshold crossed: ip={ip} count={count}/{AUTH_FAIL_WINDOW}s")
+                try:
+                    await _create_auth_alert_ticket(ip, count)
+                except Exception as e:
+                    logger.error(f"Failed to create auth alert ticket: {e}")
+
+
+async def _create_auth_alert_ticket(ip: str, count: int):
+    """Create a SuperOps ticket alerting to repeated auth failures."""
+    mutation = """
+    mutation CreateTicket($input: createTicketInput!) {
+      createTicket(input: $input) { ticketId }
+    }
+    """
+    variables = {
+        "input": {
+            "subject": f"Security Alert: Repeated auth failures from {ip}",
+            "description": (
+                f"<p><strong>Automated Security Alert</strong></p>"
+                f"<p>IP address <code>{ip}</code> has had <strong>{count}</strong> "
+                f"authentication failures in the last {AUTH_FAIL_WINDOW // 60} minutes "
+                f"against the Bracer Chat API (chat.bracer.ca).</p>"
+                f"<p>This may indicate a brute force attempt. Review server logs for details.</p>"
+            ),
+            "priority": "HIGH",
+        }
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            "https://api.superops.ai/msp",
+            headers={
+                "authorization": f"Bearer {SUPEROPS_API_KEY}",
+                "CustomerSubDomain": SUPEROPS_SUBDOMAIN,
+                "Content-Type": "application/json",
+            },
+            json={"query": mutation, "variables": variables},
+        )
+    if resp.status_code == 200:
+        logger.info(f"Auth alert ticket created for IP {ip}")
+    else:
+        logger.error(f"Failed to create auth alert ticket: {resp.status_code} {resp.text[:200]}")
+
+
+async def _validate_machine_token(access_token: str, client_ip: str = "unknown"):
     """Validate a machine Matrix access token. Returns hostname string or None."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(
@@ -661,6 +799,7 @@ async def _validate_machine_token(access_token: str):
             headers={"Authorization": f"Bearer {access_token}"},
         )
     if resp.status_code != 200:
+        await _track_auth_failure(client_ip)
         return None
     user_id = resp.json().get("user_id", "")
     # Expected format: @hostname:chat.bracer.ca
@@ -693,10 +832,20 @@ def _filter_log_lines(content: bytes) -> bytes:
 
 
 @app.get("/api/update/check")
-async def update_check():
-    """Return the current app version and update type. Public — no auth required.
-    update_type: 'asar' for code-only updates (~3 MB), 'installer' for Electron/native dep bumps (~92 MB).
+async def update_check(request: Request):
+    """Return the current app version and update type.
+    Accepts auth token if provided (v1.0.58+), but allows unauthenticated
+    requests for backwards compatibility with v1.0.57 clients that don't
+    send auth on this endpoint. Auth will be required once fleet is on v1.0.58+.
     """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:]
+        hostname = await _validate_machine_token(token, request.client.host)
+        if hostname:
+            logger.info(f"Update check (authenticated): hostname={hostname}")
+        # If token is invalid, still allow the check — don't block old clients
+
     try:
         with open("/var/www/install/latest.txt") as f:
             version = f.read().strip()
@@ -711,17 +860,28 @@ async def update_check():
 
 
 @app.get("/api/update/asar")
-async def update_asar(request: Request):
-    """Stream the latest app.asar (~3 MB). Requires a valid machine Matrix access token."""
+async def update_asar(request: Request, sig: str = None):
+    """Stream the latest app.asar or return its Ed25519 signature (?sig=1).
+    Requires a valid machine Matrix access token."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
     token    = auth[7:]
-    hostname = await _validate_machine_token(token)
+    hostname = await _validate_machine_token(token, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     asar_path = "/var/www/install/app-latest.asar"
+
+    # Return signature if requested
+    if sig == "1":
+        sig_path = asar_path + ".sig"
+        if not os.path.exists(sig_path):
+            raise HTTPException(status_code=503, detail="Signature not available")
+        with open(sig_path) as f:
+            signature = f.read().strip()
+        return {"signature": signature}
+
     if not os.path.exists(asar_path):
         raise HTTPException(status_code=503, detail="ASAR not available")
 
@@ -739,17 +899,28 @@ async def update_asar(request: Request):
 
 
 @app.get("/api/update/download")
-async def update_download(request: Request):
-    """Stream the latest installer EXE. Requires a valid machine Matrix access token."""
+async def update_download(request: Request, sig: str = None):
+    """Stream the latest installer EXE or return its Ed25519 signature (?sig=1).
+    Requires a valid machine Matrix access token."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
     token    = auth[7:]
-    hostname = await _validate_machine_token(token)
+    hostname = await _validate_machine_token(token, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     exe_path = os.path.realpath(INSTALL_EXE_PATH)
+
+    # Return signature if requested
+    if sig == "1":
+        sig_path = exe_path + ".sig"
+        if not os.path.exists(sig_path):
+            raise HTTPException(status_code=503, detail="Signature not available")
+        with open(sig_path) as f:
+            signature = f.read().strip()
+        return {"signature": signature}
+
     if not os.path.exists(exe_path):
         raise HTTPException(status_code=503, detail="Installer not available")
 
@@ -768,6 +939,192 @@ async def update_download(request: Request):
     )
 
 
+# ── Guest Chat (Public Website Widget) ─────────────────────────────────────────
+
+GUEST_DB = "/opt/bracer-register/guest_sessions.db"
+GUEST_ROOM_RETENTION_MS = 72 * 60 * 60 * 1000  # 72 hours
+
+
+def _init_guest_db():
+    db = sqlite3.connect(GUEST_DB)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS guest_sessions (
+            user_id    TEXT PRIMARY KEY,
+            room_id    TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            last_activity REAL NOT NULL
+        )
+    """)
+    db.commit()
+    db.close()
+
+
+_init_guest_db()
+
+
+class GuestStartRequest(BaseModel):
+    name: str = "Visitor"
+
+    @validator("name")
+    def validate_name(cls, v):
+        v = v.strip()
+        if not (1 <= len(v) <= 64):
+            raise ValueError("Name must be 1-64 characters")
+        # Strip anything that could be used for injection
+        v = re.sub(r"[^\w\s\-.]", "", v)
+        return v or "Visitor"
+
+
+@app.post("/api/guest/start")
+async def guest_start(request: Request, body: GuestStartRequest):
+    """Create a temporary guest Matrix account and support room for the website chat widget."""
+    guest_id_suffix = secrets.token_hex(8)
+    guest_localpart = f"guest-{guest_id_suffix}"
+    user_id = f"@{guest_localpart}:{SERVER_NAME}"
+    display_name = body.name
+
+    logger.info(f"Guest chat start: name={display_name} ip={request.client.host}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+
+        # 1. Create guest Matrix user
+        password = generate_password()
+        resp = await client.put(
+            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
+            headers=admin_headers,
+            json={
+                "password": password,
+                "displayname": display_name,
+                "admin": False,
+                "deactivated": False,
+            },
+        )
+        if resp.status_code not in (200, 201):
+            logger.error(f"Failed to create guest {user_id}: {resp.status_code} {resp.text}")
+            raise HTTPException(status_code=500, detail="Failed to start chat session")
+
+        # 2. Log in as guest to get access token
+        resp = await client.post(
+            f"{SYNAPSE_URL}/_matrix/client/v3/login",
+            json={
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": guest_localpart},
+                "password": password,
+                "device_id": f"GUEST_{guest_id_suffix.upper()}",
+            },
+        )
+        if resp.status_code != 200:
+            logger.error(f"Guest login failed for {user_id}: {resp.text}")
+            raise HTTPException(status_code=500, detail="Failed to start chat session")
+
+        login = resp.json()
+        access_token = login["access_token"]
+
+        # 3. Create a private support room
+        resp = await client.post(
+            f"{SYNAPSE_URL}/_matrix/client/v3/createRoom",
+            headers=admin_headers,
+            json={
+                "name": f"Website Chat — {display_name}",
+                "topic": "Live chat from bracer.ca website",
+                "preset": "private_chat",
+                "visibility": "private",
+                "creation_content": {"m.federate": False},
+                "power_level_content_override": {
+                    "events": {
+                        "m.room.name": 100,
+                        "m.room.power_levels": 100,
+                        "m.room.history_visibility": 100,
+                        "m.room.tombstone": 100,
+                        "m.room.server_acl": 100,
+                        "m.room.encryption": 100,
+                    },
+                    "events_default": 0,
+                    "invite": 50,
+                    "kick": 50,
+                    "redact": 50,
+                    "state_default": 50,
+                    "users": {
+                        "@chris.paetz:chat.bracer.ca": 100,
+                        "@teri.sauve:chat.bracer.ca": 50,
+                        "@bracer-register:chat.bracer.ca": 100,
+                        user_id: 10,
+                    },
+                    "users_default": 0,
+                },
+                "invite": STAFF_USERS + [BOT_USER],
+            },
+        )
+        if resp.status_code != 200:
+            logger.error(f"Failed to create guest room: {resp.text}")
+            raise HTTPException(status_code=500, detail="Failed to create chat room")
+
+        room_id = resp.json()["room_id"]
+
+        # 4. Force-join guest to the room
+        await client.post(
+            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{room_id}",
+            headers=admin_headers,
+            json={"user_id": user_id},
+        )
+
+        # 5. Set 1-hour retention on the room
+        await client.put(
+            f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/state/m.room.retention/",
+            headers=admin_headers,
+            json={"max_lifetime": GUEST_ROOM_RETENTION_MS},
+        )
+
+    # 6. Track the session for cleanup
+    now = time.time()
+    db = sqlite3.connect(GUEST_DB)
+    db.execute(
+        "INSERT OR REPLACE INTO guest_sessions VALUES (?, ?, ?, ?)",
+        (user_id, room_id, now, now),
+    )
+    db.commit()
+    db.close()
+
+    logger.info(f"Guest chat ready: {user_id} room={room_id}")
+    return {
+        "user_id": user_id,
+        "access_token": access_token,
+        "room_id": room_id,
+        "homeserver": f"https://{SERVER_NAME}",
+    }
+
+
+@app.post("/api/guest/heartbeat")
+async def guest_heartbeat(request: Request):
+    """Update last_activity timestamp for a guest session. Called periodically by widget."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = auth[7:]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{SYNAPSE_URL}/_matrix/client/v3/account/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = resp.json().get("user_id", "")
+    if not user_id.startswith("@guest-"):
+        raise HTTPException(status_code=403, detail="Not a guest session")
+
+    db = sqlite3.connect(GUEST_DB)
+    db.execute(
+        "UPDATE guest_sessions SET last_activity = ? WHERE user_id = ?",
+        (time.time(), user_id),
+    )
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
 @app.post("/api/logs/upload")
 async def logs_upload(request: Request):
     """Receive a machine error log. Requires a valid machine Matrix access token."""
@@ -775,13 +1132,23 @@ async def logs_upload(request: Request):
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
     token    = auth[7:]
-    hostname = await _validate_machine_token(token)
+    hostname = await _validate_machine_token(token, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     body = await request.body()
     if len(body) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Log too large")
+
+    # Validate content is valid UTF-8 text (reject binary/executable uploads)
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Log must be UTF-8 text")
+
+    # Check for null bytes (binary data indicator)
+    if b"\x00" in body:
+        raise HTTPException(status_code=400, detail="Log must be plain text")
 
     filtered = _filter_log_lines(body)
 
@@ -792,3 +1159,302 @@ async def logs_upload(request: Request):
 
     logger.info(f"Log uploaded: hostname={hostname} size={len(filtered)}")
     return {"ok": True}
+
+
+# ── Admin Dashboard ─────────────────────────────────────────────────────────────
+
+HOLIDAY_CONFIG_PATH = "/opt/bracer-register/holiday.json"
+ADMIN_SESSION_STORE: dict = {}  # session_id -> { user_id, access_token, expires }
+ADMIN_SESSION_TTL = 8 * 3600  # 8 hours
+
+
+def _load_holiday_config() -> dict:
+    try:
+        with open(HOLIDAY_CONFIG_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"enabled": False, "message": ""}
+
+
+def _save_holiday_config(config: dict):
+    with open(HOLIDAY_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+async def _validate_admin_session(request: Request) -> str:
+    """Validate admin session cookie. Returns user_id or raises 401."""
+    session_id = request.cookies.get("bcw_admin")
+    if not session_id or session_id not in ADMIN_SESSION_STORE:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    session = ADMIN_SESSION_STORE[session_id]
+    if time.time() > session["expires"]:
+        del ADMIN_SESSION_STORE[session_id]
+        raise HTTPException(status_code=401, detail="Session expired")
+    return session["user_id"]
+
+
+@app.get("/api/admin/login")
+async def admin_login(provider: str = ""):
+    """Redirect to Synapse SSO login. Optional provider param: 'google' or 'microsoft'."""
+    callback = f"https://{SERVER_NAME}/admin/callback"
+    if provider == "google":
+        sso_url = f"https://{SERVER_NAME}/_matrix/client/v3/login/sso/redirect/oidc-google?redirectUrl={callback}"
+    elif provider == "microsoft":
+        sso_url = f"https://{SERVER_NAME}/_matrix/client/v3/login/sso/redirect/oidc-microsoft?redirectUrl={callback}"
+    else:
+        sso_url = f"https://{SERVER_NAME}/_matrix/client/v3/login/sso/redirect?redirectUrl={callback}"
+    return RedirectResponse(url=sso_url)
+
+
+@app.get("/api/admin/callback")
+async def admin_callback(loginToken: str = ""):
+    """Handle SSO callback — exchange loginToken for access_token, validate staff, set cookie."""
+    if not loginToken:
+        raise HTTPException(status_code=400, detail="Missing loginToken")
+
+    # Exchange loginToken for access_token
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{SYNAPSE_URL}/_matrix/client/v3/login",
+            json={
+                "type": "m.login.token",
+                "token": loginToken,
+            },
+        )
+    if resp.status_code != 200:
+        logger.warning(f"Admin SSO login failed: {resp.status_code} {resp.text[:200]}")
+        raise HTTPException(status_code=401, detail="SSO login failed")
+
+    login_data = resp.json()
+    user_id = login_data.get("user_id", "")
+    access_token = login_data.get("access_token", "")
+
+    # Check if user is staff
+    if user_id not in STAFF_USERS:
+        logger.warning(f"Admin login rejected: {user_id} is not staff")
+        # Logout the token we just created
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{SYNAPSE_URL}/_matrix/client/v3/logout",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        raise HTTPException(status_code=403, detail="Access denied — staff only")
+
+    # Create admin session
+    session_id = secrets.token_hex(32)
+    ADMIN_SESSION_STORE[session_id] = {
+        "user_id": user_id,
+        "access_token": access_token,
+        "expires": time.time() + ADMIN_SESSION_TTL,
+    }
+
+    logger.info(f"Admin login: {user_id}")
+    response = RedirectResponse(url="/admin/", status_code=303)
+    response.set_cookie(
+        key="bcw_admin",
+        value=session_id,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=ADMIN_SESSION_TTL,
+    )
+    return response
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(request: Request):
+    """Log out admin session."""
+    session_id = request.cookies.get("bcw_admin")
+    if session_id and session_id in ADMIN_SESSION_STORE:
+        session = ADMIN_SESSION_STORE.pop(session_id)
+        # Logout the Matrix token
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{SYNAPSE_URL}/_matrix/client/v3/logout",
+                headers={"Authorization": f"Bearer {session['access_token']}"},
+            )
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("bcw_admin")
+    return response
+
+
+@app.get("/api/admin/status")
+async def admin_status(request: Request):
+    """Return dashboard status: online clients, holiday config, companies."""
+    user_id = await _validate_admin_session(request)
+
+    admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+
+    # Get all users with their last_seen timestamp
+    online_machines = []
+    companies = {}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Fetch all users (paginated)
+        users = []
+        from_token = "0"
+        while True:
+            resp = await client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v2/users?from={from_token}&limit=100&guests=false",
+                headers=admin_headers,
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            users.extend(data.get("users", []))
+            next_token = data.get("next_token")
+            if not next_token:
+                break
+            from_token = str(next_token)
+
+        # Filter to machine accounts (no dots in localpart, not staff/bot/guest)
+        now_ms = int(time.time() * 1000)
+        five_min_ms = 5 * 60 * 1000
+
+        for user in users:
+            uid = user.get("name", "")
+            localpart = uid.split(":")[0][1:] if ":" in uid else ""
+
+            # Skip staff, bot, guest, and registration accounts
+            if "." in localpart or localpart.startswith("guest-"):
+                continue
+            if localpart in ("bracerbot", "bracer-register"):
+                continue
+
+            last_seen = user.get("last_seen_ts") or 0
+            is_online = (now_ms - last_seen) < five_min_ms if last_seen else False
+
+            machine_info = {
+                "hostname": localpart,
+                "user_id": uid,
+                "online": is_online,
+                "last_seen": last_seen,
+                "displayname": user.get("displayname", localpart),
+            }
+
+            # Look up company + machine room via joined rooms
+            company_name = None
+            company_room = None
+            machine_room = None
+            resp2 = await client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v1/users/{uid}/joined_rooms",
+                headers=admin_headers,
+            )
+            if resp2.status_code == 200:
+                for room_id in resp2.json().get("joined_rooms", []):
+                    resp3 = await client.get(
+                        f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{room_id}",
+                        headers=admin_headers,
+                    )
+                    if resp3.status_code == 200:
+                        rdata = resp3.json()
+                        alias = rdata.get("canonical_alias") or ""
+                        if alias.startswith("#company-"):
+                            company_room = room_id
+                            rname = rdata.get("name", "")
+                            for sep in (" \u2014 ", " \u2013 ", " - "):
+                                if sep in rname:
+                                    company_name = rname.split(sep)[0].strip()
+                                    break
+                            if not company_name:
+                                company_name = rname.strip()
+                        elif alias == f"#{localpart}:{SERVER_NAME}":
+                            machine_room = room_id
+
+            machine_info["company"] = company_name or "Unknown"
+            machine_info["machine_room"] = machine_room
+            machine_info["company_room"] = company_room
+            machine_info["created_at"] = user.get("creation_ts", 0)
+
+            co_key = company_name or "Unknown"
+            if co_key not in companies:
+                companies[co_key] = {
+                    "name": co_key,
+                    "room_id": company_room,
+                    "machines": [],
+                    "online_count": 0,
+                }
+            companies[machine_info["company"]]["machines"].append(machine_info)
+            if is_online:
+                companies[machine_info["company"]]["online_count"] += 1
+
+    holiday = _load_holiday_config()
+
+    total_machines = sum(len(c["machines"]) for c in companies.values())
+    total_online = sum(c["online_count"] for c in companies.values())
+
+    return {
+        "user_id": user_id,
+        "holiday": holiday,
+        "total_machines": total_machines,
+        "total_online": total_online,
+        "companies": dict(sorted(companies.items(), key=lambda x: x[0].lower())),
+        "broadcast_room_id": BROADCAST_ROOM_ID,
+    }
+
+
+@app.post("/api/admin/holiday")
+async def admin_holiday(request: Request):
+    """Toggle holiday mode and/or set message."""
+    user_id = await _validate_admin_session(request)
+    body = await request.json()
+
+    config = _load_holiday_config()
+    if "enabled" in body:
+        config["enabled"] = bool(body["enabled"])
+    if "message" in body:
+        config["message"] = str(body["message"])[:500]
+
+    _save_holiday_config(config)
+    logger.info(f"Holiday config updated by {user_id}: enabled={config['enabled']}")
+    return {"ok": True, "holiday": config}
+
+
+@app.post("/api/admin/broadcast")
+async def admin_broadcast(request: Request):
+    """Send a broadcast message to a company room or all clients."""
+    user_id = await _validate_admin_session(request)
+    session_id = request.cookies.get("bcw_admin")
+    session = ADMIN_SESSION_STORE.get(session_id, {})
+    access_token = session.get("access_token", "")
+
+    body = await request.json()
+    message = str(body.get("message", "")).strip()
+    target = body.get("target", "all")  # "all" or a room_id
+
+    if not message:
+        raise HTTPException(status_code=400, detail="Message required")
+    if len(message) > 2000:
+        raise HTTPException(status_code=400, detail="Message too long (max 2000 chars)")
+
+    rooms_sent = []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        if target == "all":
+            # Send to bracer-broadcast (all clients)
+            resp = await client.put(
+                f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{BROADCAST_ROOM_ID}/send/m.room.message/{secrets.token_hex(8)}",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"msgtype": "m.text", "body": message},
+            )
+            if resp.status_code == 200:
+                rooms_sent.append(BROADCAST_ROOM_ID)
+            else:
+                logger.error(f"Broadcast to all failed: {resp.status_code} {resp.text[:200]}")
+                raise HTTPException(status_code=500, detail="Failed to send broadcast")
+        else:
+            # Send to specific company room
+            room_id = target
+            resp = await client.put(
+                f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{secrets.token_hex(8)}",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"msgtype": "m.text", "body": message},
+            )
+            if resp.status_code == 200:
+                rooms_sent.append(room_id)
+            else:
+                logger.error(f"Broadcast to {room_id} failed: {resp.status_code} {resp.text[:200]}")
+                raise HTTPException(status_code=500, detail="Failed to send message")
+
+    logger.info(f"Broadcast by {user_id}: target={target} rooms={len(rooms_sent)}")
+    return {"ok": True, "rooms_sent": len(rooms_sent)}

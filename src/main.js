@@ -36,7 +36,7 @@ const fs   = require('fs');
 const os   = require('os');
 
 const { readSession }                    = require('./credentials');
-const { getMachineInfo, getWindowsUser, getWindowsUserAsync } = require('./machine-info');
+const { getMachineInfo, getWindowsUser, getWindowsUserAsync, getCpuAndMemory, getDiskInfo, getNetworkInfo, getUptimeInfo } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray, setTrayBadge, clearTrayBadge } = require('./tray');
 const { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow, setAlwaysOnTop } = require('./window');
@@ -366,6 +366,17 @@ app.on('ready', async () => {
     }
   }
 
+  // Resolve broadcast room by alias — fixes stale room IDs after room rebuilds
+  try {
+    const resolvedId = await matrixClient.resolveRoomAlias('#bracer-broadcast:chat.bracer.ca');
+    if (resolvedId && resolvedId !== session.room_id_broadcast) {
+      console.log(`[BracerChat] Broadcast room ID updated: ${session.room_id_broadcast} → ${resolvedId}`);
+      session.room_id_broadcast = resolvedId;
+    }
+  } catch (err) {
+    console.warn('[BracerChat] Could not resolve broadcast room alias:', err.message);
+  }
+
   // 5. Listen for new messages → popup ───────────────────────────────────
   matrixClient.onMessage(({ roomId, event }) => {
     // Hidden staff commands — handled silently, never shown in the chat
@@ -388,6 +399,114 @@ app.on('ready', async () => {
       console.log('[BracerChat] !machineinfo received from', event.sender);
       postMachineInfo().catch(err =>
         console.error('[BracerChat] !machineinfo reply failed:', err.message));
+      return;
+    }
+
+    // !version — app version, Windows version, hostname
+    if (msgBody === '!version' && event.sender !== session.user_id) {
+      (async () => {
+        const text = [
+          '**Version Info**',
+          `App:      Bracer Chat v${app.getVersion()}`,
+          `Hostname: ${os.hostname()}`,
+          `OS:       ${os.type()} ${os.release()} (${os.arch()})`,
+          `Electron: ${process.versions.electron}`,
+          `Node:     ${process.versions.node}`,
+        ].join('\n');
+        await matrixClient.sendMessage(session.room_id_machine, text);
+      })().catch(err => console.error('[BracerChat] !version failed:', err.message));
+      return;
+    }
+
+    // !cpu — CPU model, usage %, RAM used/total
+    if (msgBody === '!cpu' && event.sender !== session.user_id) {
+      (async () => {
+        const info = await getCpuAndMemory();
+        const text = [
+          '**CPU & Memory**',
+          `CPU:    ${info.cpuModel}`,
+          `Usage:  ${info.cpuUsage}`,
+          `Memory: ${info.memory}`,
+        ].join('\n');
+        await matrixClient.sendMessage(session.room_id_machine, text);
+      })().catch(err => console.error('[BracerChat] !cpu failed:', err.message));
+      return;
+    }
+
+    // !disk — drive info with brand, model, serial, usage
+    if (msgBody === '!disk' && event.sender !== session.user_id) {
+      (async () => {
+        const info = await getDiskInfo();
+        const lines = ['**Disk Info**'];
+        if (info.disks.length) {
+          lines.push('');
+          for (const d of info.disks) {
+            lines.push(`Drive: ${d.model} (${d.sizeGB} GB)`);
+            lines.push(`  Serial: ${d.serial}`);
+          }
+        }
+        if (info.volumes.length) {
+          lines.push('');
+          for (const v of info.volumes) {
+            lines.push(`${v.drive} ${v.label ? '(' + v.label + ')' : ''} — ${v.usage}`);
+          }
+        }
+        if (!info.disks.length && !info.volumes.length) {
+          lines.push('Could not retrieve disk information.');
+        }
+        await matrixClient.sendMessage(session.room_id_machine, lines.join('\n'));
+      })().catch(err => console.error('[BracerChat] !disk failed:', err.message));
+      return;
+    }
+
+    // !ip — all network adapters with IPs
+    if (msgBody === '!ip' && event.sender !== session.user_id) {
+      (async () => {
+        const adapters = getNetworkInfo();
+        const lines = ['**Network Adapters**'];
+        if (adapters.length) {
+          for (const a of adapters) {
+            lines.push(`${a.name}: ${a.ip} (MAC: ${a.mac})${a.internal ? ' [loopback]' : ''}`);
+          }
+        } else {
+          lines.push('No network adapters found.');
+        }
+        await matrixClient.sendMessage(session.room_id_machine, lines.join('\n'));
+      })().catch(err => console.error('[BracerChat] !ip failed:', err.message));
+      return;
+    }
+
+    // !uptime — system uptime + last reboot
+    if (msgBody === '!uptime' && event.sender !== session.user_id) {
+      (async () => {
+        const info = await getUptimeInfo();
+        const text = [
+          '**System Uptime**',
+          `Uptime:      ${info.uptime}`,
+          `Last Reboot: ${info.lastReboot}`,
+        ].join('\n');
+        await matrixClient.sendMessage(session.room_id_machine, text);
+      })().catch(err => console.error('[BracerChat] !uptime failed:', err.message));
+      return;
+    }
+
+    // !help — list available staff commands (technician only)
+    if (msgBody === '!help' && event.sender !== session.user_id) {
+      (async () => {
+        const text = [
+          '**Staff Commands**',
+          '',
+          '!version     — App version, OS, hostname',
+          '!cpu         — CPU model, usage %, RAM',
+          '!disk        — Disk drives, models, serials, usage',
+          '!ip          — Network adapters and IPs',
+          '!uptime      — System uptime and last reboot',
+          '!machineinfo — All-in-one machine summary',
+          '!alwaysontop — Force window on top for 15 min',
+          '!help        — This list',
+        ].join('\n');
+        await matrixClient.sendMessage(session.room_id_machine, text);
+      })().catch(err => console.error('[BracerChat] !help failed:', err.message));
       return;
     }
 

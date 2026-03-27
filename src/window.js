@@ -8,8 +8,8 @@
  *   then released after 3 s so the user can move it behind other windows.
  */
 
-const { BrowserWindow, screen } = require('electron');
-const path                      = require('path');
+const { BrowserWindow, screen, nativeTheme } = require('electron');
+const path                                    = require('path');
 
 let win = null;
 
@@ -31,17 +31,18 @@ function createWindow(preloadPath, htmlPath) {
   const winH      = workArea.height;
 
   win = new BrowserWindow({
-    width       : WIN_WIDTH,
-    height      : winH,
-    x           : winX,
-    y           : winY,
-    show        : false,
-    frame       : true,
-    resizable   : true,
-    skipTaskbar : false,  // Show in taskbar so icon is always visible
-    title       : 'Bracer Chat',
-    icon        : iconPath,
-    webPreferences: {
+    width           : WIN_WIDTH,
+    height          : winH,
+    x               : winX,
+    y               : winY,
+    show            : false,
+    frame           : true,
+    resizable       : true,
+    skipTaskbar     : false,  // Show in taskbar so icon is always visible
+    title           : 'Bracer Chat',
+    icon            : iconPath,
+    backgroundColor : nativeTheme.shouldUseDarkColors ? '#121212' : '#FFFFFF',
+    webPreferences  : {
       preload          : preloadPath,
       contextIsolation : true,
       nodeIntegration  : false,

@@ -5,19 +5,77 @@
 }
 
 /* ── Reset & variables ──────────────────────────────────────────────────── */
+/* ── Light mode (default) — Bracer Systems branding ──────────────────── */
 :root {
-  --color-primary       : #E65100;
-  --color-primary-dark  : #BF360C;
+  --color-primary       : #2099c6;
+  --color-primary-dark  : #187aa0;
+  --color-accent        : #f8941b;
+  --color-accent-dark   : #d67d14;
   --color-bg            : #FFFFFF;
-  --color-surface       : #FFF8F5;
+  --color-surface       : #f4f8fa;
   --color-border        : #E0E0E0;
   --color-text          : #212121;
   --color-text-secondary: #757575;
-  --color-msg-own       : #FFF3E0;
+  --color-msg-own       : #e3f2fd;
   --color-msg-other     : #F5F5F5;
   --color-warn-bg       : #FFEBEE;
   --color-warn-text     : #C62828;
   --color-warn-border   : #FFCDD2;
+}
+
+/* ── Dark mode — auto-detected from system setting ───────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-primary       : #2099c6;
+    --color-primary-dark  : #58b8dc;
+    --color-accent        : #f8941b;
+    --color-accent-dark   : #ffa940;
+    --color-bg            : #121212;
+    --color-surface       : #1e1e1e;
+    --color-border        : #333333;
+    --color-text          : #e0e0e0;
+    --color-text-secondary: #a0a0a0;
+    --color-msg-own       : #1a3350;
+    --color-msg-other     : #2a2a2a;
+    --color-warn-bg       : #3c1a1a;
+    --color-warn-text     : #ff8a80;
+    --color-warn-border   : #5c2a2a;
+  }
+
+  /* Dark mode overrides for elements that use hardcoded colors */
+  #search-input { background: var(--color-surface); color: var(--color-text); }
+  #msg-input { background: var(--color-surface); color: var(--color-text); }
+  .compose-btn { color: var(--color-accent); border-color: var(--color-accent); }
+  .compose-btn:hover { background: var(--color-surface); color: #fff; }
+  #btn-send { background: var(--color-accent); }
+  #btn-send:hover { background: var(--color-accent-dark); }
+  #btn-ticket { background: var(--color-accent); }
+  #btn-ticket:hover { background: var(--color-accent-dark); }
+  .message .sender { color: var(--color-primary); }
+  .message .time { color: var(--color-text-secondary); }
+  .message.own .body, .message.other .body { color: var(--color-text); }
+  .copy-btn, .reply-btn, .pin-btn { background: rgba(30,30,30,0.85); color: var(--color-text-secondary); }
+  .message:hover .copy-btn, .message:hover .reply-btn { background: rgba(30,30,30,0.95); }
+  .copy-btn:hover, .reply-btn:hover { background: var(--color-primary) !important; color: #fff !important; }
+  .pin-btn:hover { background: var(--color-surface); }
+  .pin-btn.pinned { background: rgba(30,30,30,0.95); }
+  #ctx-menu { background: var(--color-surface); border-color: var(--color-border); }
+  .ctx-item { color: var(--color-text); }
+  .ctx-item:hover { background: var(--color-bg); }
+  #emoji-picker { background: var(--color-surface); border-color: var(--color-border); }
+  #emoji-grid button:hover, #emoji-recent-grid button:hover { background: var(--color-bg); }
+  #screen-picker { background: var(--color-surface); border-color: var(--color-border); }
+  #screen-picker-cancel { color: var(--color-text-secondary); border-color: var(--color-border); }
+  #screen-picker-cancel:hover { background: var(--color-bg); }
+  .broadcast-box { background: #2a1a1a; border-color: #c62828; }
+  .broadcast-label { color: #ff6b6b; }
+  mark.search-highlight { background: #5c4a00; }
+  mark.search-highlight.active { background: #f8941b; color: #121212; }
+  .reply-quote { background: rgba(255,255,255,0.04); }
+  .reply-quote:hover { background: rgba(32,153,198,0.12); }
+  .reply-quote-text { color: #888; }
+  .drag-overlay { background: rgba(32,153,198,0.15); }
+  .poll-card { background: var(--color-surface); border-color: var(--color-border); }
 }
 
 *, *::before, *::after {
@@ -370,7 +428,7 @@ mark.search-highlight.active {
 }
 
 #btn-send {
-  background   : var(--color-primary);
+  background   : var(--color-accent, var(--color-primary));
   color        : #fff;
   border       : none;
   border-radius: 5px;
@@ -382,7 +440,7 @@ mark.search-highlight.active {
 }
 
 #btn-send:hover {
-  background: var(--color-primary-dark);
+  background: var(--color-accent-dark, var(--color-primary-dark));
 }
 
 #btn-send:disabled {
@@ -928,7 +986,7 @@ mark.search-highlight.active {
 
 /* ── Open Ticket button ──────────────────────────────────────────────────── */
 #btn-ticket {
-  background   : var(--color-primary);
+  background   : var(--color-accent, var(--color-primary));
   color        : #fff;
   border       : none;
   border-radius: 5px;
@@ -941,7 +999,7 @@ mark.search-highlight.active {
 }
 
 #btn-ticket:hover {
-  background: var(--color-primary-dark);
+  background: var(--color-accent-dark, var(--color-primary-dark));
 }
 
 #btn-ticket:disabled {

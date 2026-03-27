@@ -254,6 +254,23 @@ class MatrixClient {
   }
 
   /**
+   * Resolve a room alias to a room ID.
+   * @param {string} alias  e.g. "#bracer-broadcast:chat.bracer.ca"
+   * @returns {string|null}  room ID or null
+   */
+  async resolveRoomAlias(alias) {
+    try {
+      const encoded = encodeURIComponent(alias);
+      const data = await this._request('GET',
+        `/_matrix/client/v3/directory/room/${encoded}`
+      );
+      return data.room_id || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Fetch the most recent messages in a room (returns in chronological order).
    */
   /**

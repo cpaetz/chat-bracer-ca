@@ -32,6 +32,26 @@ chat.bracer.ca {
         file_server
     }
 
+    # Admin dashboard (SSO-authenticated via API)
+    handle /admin/* {
+        root * /var/www
+        try_files {path} /admin/index.html
+        file_server
+    }
+
+    # Admin API callback — rewrite to API path preserving query params
+    rewrite /admin/callback /api/admin/callback
+
+    # Public chat widget assets (served to bracer.ca via script tag)
+    handle /widget/* {
+        root * /var/www
+        file_server
+        header {
+            Access-Control-Allow-Origin https://bracer.ca
+            Cache-Control "public, max-age=300"
+        }
+    }
+
     root * /var/www/element
     file_server
 
