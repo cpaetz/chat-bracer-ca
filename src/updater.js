@@ -186,9 +186,14 @@ function registerSystemTask(taskName, ps1Path, onSuccess) {
       console.log(`[Updater] SYSTEM task '${taskName}' registered. Quitting...`);
       onSuccess();
     } else {
-      console.warn(`[Updater] schtasks failed (code ${code}). Falling back to direct PowerShell spawn...`);
+      console.warn(`[Updater] schtasks failed (code ${code}). Falling back to elevated PowerShell spawn...`);
+      // Use Start-Process -Verb RunAs to request UAC elevation for the installer.
+      // This will show a UAC prompt but is the only way to install to Program Files
+      // when the app is running as a non-admin user.
+      const ps1Esc = ps1Path.replace(/\\/g, '\\\\').replace(/'/g, "''");
       spawn('powershell.exe', [
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        `Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${ps1Esc}""' -Verb RunAs -WindowStyle Hidden`
       ], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
       onSuccess();
     }
