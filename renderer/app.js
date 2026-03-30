@@ -880,14 +880,7 @@ function makeCopyBtn(event, textOverride, imgEl) {
       : (event.content && event.content.body ? event.content.body : '');
     const ts   = event.origin_server_ts ? `[${formatTime(event.origin_server_ts)}] ` : '';
     const text = ts + body;
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
+    window.bracerChat.clipboardWrite(text);
     btn.textContent = 'Copied!';
     btn.classList.add('copied');
     setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
