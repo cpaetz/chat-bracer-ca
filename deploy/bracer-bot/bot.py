@@ -43,6 +43,11 @@ INPUT_MAX_LEN        = 2000  # max chars per user input field
 SUPEROPS_GQL_URL = "https://api.superops.ai/msp"
 SUPEROPS_UPLOAD_URL = "https://api.superops.ai/upload"
 
+AUTORESPONDER_CONFIG_PATH = "/opt/bracer-register/autoresponder.json"
+
+# In-memory: tracks the timestamp of the last message in each room (any sender)
+_room_last_message: dict[str, float] = {}  # room_id -> epoch seconds
+
 GREETING_BUSINESS = (
     "Hi! Thanks for reaching out to Bracer Systems Support. "
     "A technician will be with you as soon as possible. "
@@ -307,6 +312,42 @@ def is_business_hours() -> bool:
         return False  # Holiday mode = treat as after-hours
     now = datetime.now(TIMEZONE)
     return now.weekday() < 5 and 8 <= now.hour < 17
+
+
+# ── Autoresponder config ─────────────────────────────────────────────────────
+
+def _load_autoresponder_config() -> dict:
+    try:
+        with open(AUTORESPONDER_CONFIG_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"enabled": False, "delay_minutes": 20, "message": ""}
+
+
+def _should_autorespond(room_id: str) -> bool:
+    """Return True if the room has been idle for at least delay_minutes."""
+    config = _load_autoresponder_config()
+    if not config.get("enabled", False):
+        return False
+    if not config.get("message", "").strip():
+        return False
+    delay = max(1, config.get("delay_minutes", 20))
+    last_ts = _room_last_message.get(room_id)
+    if last_ts is None:
+        # No prior message tracked — treat as idle (first message since bot started)
+        return True
+    elapsed_min = (datetime.now(timezone.utc).timestamp() - last_ts) / 60.0
+    return elapsed_min >= delay
+
+
+def _get_autoresponder_message() -> str:
+    config = _load_autoresponder_config()
+    return config.get("message", "").strip()
+
+
+def _record_room_activity(room_id: str):
+    """Record that a message was sent in this room (any sender)."""
+    _room_last_message[room_id] = datetime.now(timezone.utc).timestamp()
 
 
 # ── Synapse admin ──────────────────────────────────────────────────────────────
@@ -840,9 +881,24 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
     body    = _truncate(event.body.strip())
     log     = logging.getLogger("bracer-bot")
 
-    # Ignore self and staff
+    # ── Autoresponder: check idle time BEFORE recording this message ──────────
+    is_from_customer = (sender != BOT_USER_ID and sender not in STAFF_USERS)
+    should_autorespond = is_from_customer and _should_autorespond(room_id)
+
+    # Record activity for ALL senders (staff, bot, customers) so idle tracking works
+    _record_room_activity(room_id)
+
+    # Ignore self and staff for all other bot behaviour
     if sender == BOT_USER_ID or sender in STAFF_USERS:
         return
+
+    # Send autoresponder if room was idle long enough
+    if should_autorespond:
+        msg = _get_autoresponder_message()
+        if msg:
+            await _send(client, room_id, msg)
+            _record_room_activity(room_id)  # count the bot's reply as activity
+            log.info(f"Autoresponder sent room={room_id} sender={sender}")
 
     is_guest = _is_guest_sender(sender)
 
@@ -989,6 +1045,9 @@ async def on_image(client: AsyncClient, room, event: RoomMessageImage):
     sender  = event.sender
     room_id = room.room_id
     log     = logging.getLogger("bracer-bot")
+
+    # Record activity for idle tracking (all senders)
+    _record_room_activity(room_id)
 
     # Ignore self and staff
     if sender == BOT_USER_ID or sender in STAFF_USERS:

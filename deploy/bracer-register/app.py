@@ -1342,6 +1342,7 @@ async def logs_upload(request: Request):
 # ── Admin Dashboard ─────────────────────────────────────────────────────────────
 
 HOLIDAY_CONFIG_PATH = "/opt/bracer-register/holiday.json"
+AUTORESPONDER_CONFIG_PATH = "/opt/bracer-register/autoresponder.json"
 ADMIN_SESSION_STORE: dict = {}  # session_id -> { user_id, access_token, expires }
 ADMIN_SESSION_TTL = 8 * 3600  # 8 hours
 ADMIN_SESSION_MAX = 100  # max concurrent sessions before forced cleanup
@@ -1358,6 +1359,19 @@ def _load_holiday_config() -> dict:
 
 def _save_holiday_config(config: dict):
     with open(HOLIDAY_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def _load_autoresponder_config() -> dict:
+    try:
+        with open(AUTORESPONDER_CONFIG_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"enabled": False, "delay_minutes": 20, "message": ""}
+
+
+def _save_autoresponder_config(config: dict):
+    with open(AUTORESPONDER_CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
 
@@ -1591,6 +1605,7 @@ async def admin_status(request: Request):
                 companies[machine_info["company"]]["online_count"] += 1
 
     holiday = _load_holiday_config()
+    autoresponder = _load_autoresponder_config()
 
     total_machines = sum(len(c["machines"]) for c in companies.values())
     total_online = sum(c["online_count"] for c in companies.values())
@@ -1598,6 +1613,7 @@ async def admin_status(request: Request):
     return {
         "user_id": user_id,
         "holiday": holiday,
+        "autoresponder": autoresponder,
         "total_machines": total_machines,
         "total_online": total_online,
         "companies": dict(sorted(companies.items(), key=lambda x: x[0].lower())),
@@ -1620,6 +1636,25 @@ async def admin_holiday(request: Request):
     _save_holiday_config(config)
     logger.info(f"Holiday config updated by {user_id}: enabled={config['enabled']}")
     return {"ok": True, "holiday": config}
+
+
+@app.post("/api/admin/autoresponder")
+async def admin_autoresponder(request: Request):
+    """Update autoresponder settings (enabled, delay_minutes, message)."""
+    user_id = await _validate_admin_session(request, check_csrf=True)
+    body = await request.json()
+
+    config = _load_autoresponder_config()
+    if "enabled" in body:
+        config["enabled"] = bool(body["enabled"])
+    if "delay_minutes" in body:
+        config["delay_minutes"] = max(1, min(1440, int(body["delay_minutes"])))
+    if "message" in body:
+        config["message"] = str(body["message"])[:2000]
+
+    _save_autoresponder_config(config)
+    logger.info(f"Autoresponder config updated by {user_id}: enabled={config['enabled']} delay={config['delay_minutes']}m")
+    return {"ok": True, "autoresponder": config}
 
 
 @app.post("/api/admin/broadcast")

@@ -269,6 +269,30 @@
       </div>
 
       <div class="section">
+        <h2>Autoresponder</h2>
+        <p style="font-size:13px;color:#666;margin-bottom:12px;">
+          Automatically replies when a customer messages after a period of inactivity. Does not reply to staff.
+        </p>
+        <div class="holiday-row">
+          <label class="toggle">
+            <input type="checkbox" id="ar-toggle" onchange="toggleAutoresponder()">
+            <span class="slider"></span>
+          </label>
+          <span class="holiday-status" id="ar-label">Off</span>
+          <label style="font-size:13px;color:#666;margin-left:auto;">
+            Delay (minutes):
+            <input type="number" id="ar-delay" min="1" max="1440" value="20"
+              style="width:70px;padding:6px 10px;border:1px solid #e0e0e0;border-radius:6px;font-size:13px;font-family:inherit;">
+          </label>
+        </div>
+        <textarea class="field" id="ar-message" style="min-height:100px;"
+          placeholder="Enter the autoresponder message..."></textarea>
+        <div style="margin-top:10px;">
+          <button class="btn btn-primary" onclick="saveAutoresponder()">Save Autoresponder</button>
+        </div>
+      </div>
+
+      <div class="section">
         <h2>Broadcast Message</h2>
         <textarea class="field" id="broadcast-message" style="min-height:80px;"
           placeholder="Type a message to send to clients..."></textarea>
@@ -355,6 +379,12 @@
     document.getElementById('holiday-toggle').checked = data.holiday.enabled;
     document.getElementById('holiday-message').value = data.holiday.message || '';
     updateHolidayLabel(data.holiday.enabled);
+
+    var ar = data.autoresponder || {};
+    document.getElementById('ar-toggle').checked = ar.enabled || false;
+    document.getElementById('ar-delay').value = ar.delay_minutes || 20;
+    document.getElementById('ar-message').value = ar.message || '';
+    updateArLabel(ar.enabled || false);
 
     var select = document.getElementById('broadcast-target');
     select.innerHTML = '<option value="all">All Clients (Bracer Broadcast)</option>';
@@ -551,6 +581,39 @@
     }).then(function(r) {
       if (!r.ok) throw new Error();
       toast('Holiday message saved', 'success');
+    }).catch(function() { toast('Failed to save', 'error'); });
+  };
+
+  function updateArLabel(enabled) {
+    var label = document.getElementById('ar-label');
+    label.textContent = enabled ? 'On' : 'Off';
+    label.className = 'holiday-status ' + (enabled ? 'on' : 'off');
+  }
+
+  window.toggleAutoresponder = function() {
+    var enabled = document.getElementById('ar-toggle').checked;
+    updateArLabel(enabled);
+    fetch('/api/admin/autoresponder', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+      body: JSON.stringify({ enabled: enabled })
+    }).then(function(r) {
+      if (!r.ok) throw new Error();
+      toast(enabled ? 'Autoresponder ON' : 'Autoresponder OFF', 'success');
+    }).catch(function() { toast('Failed to update', 'error'); });
+  };
+
+  window.saveAutoresponder = function() {
+    var enabled = document.getElementById('ar-toggle').checked;
+    var delay = parseInt(document.getElementById('ar-delay').value, 10) || 20;
+    var msg = document.getElementById('ar-message').value;
+    fetch('/api/admin/autoresponder', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+      body: JSON.stringify({ enabled: enabled, delay_minutes: delay, message: msg })
+    }).then(function(r) {
+      if (!r.ok) throw new Error();
+      toast('Autoresponder saved', 'success');
     }).catch(function() { toast('Failed to save', 'error'); });
   };
 
