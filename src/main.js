@@ -64,6 +64,31 @@ const STAFF_USERS = new Set([
   '@bracerbot:chat.bracer.ca',
 ]);
 
+// Staff bang commands — hidden from client chat UI (both the command and the response)
+const HIDDEN_BANG_COMMANDS = new Set([
+  '!machineinfo', '!version', '!cpu', '!disk', '!ip', '!uptime', '!help', '!alwaysontop',
+]);
+// Prefixes that identify diagnostic responses sent by the machine itself
+const HIDDEN_RESPONSE_PREFIXES = [
+  '**Disk Info**', '**CPU & Memory**', '**System Uptime**', '**Network Adapters**',
+  '**Version Info**', '**Staff Commands**', '**Machine Info**',
+];
+
+/**
+ * Returns true if a Matrix event should be hidden from the client chat UI.
+ * Hides staff bang commands and the machine's own diagnostic responses.
+ */
+function isHiddenDiagnosticEvent(event, selfUserId) {
+  if (event.type !== 'm.room.message') return false;
+  const body = (event.content && event.content.body) || '';
+  const bodyLower = body.trim().toLowerCase();
+  // Hide bang commands from staff (but not !ticket)
+  if (HIDDEN_BANG_COMMANDS.has(bodyLower) && STAFF_USERS.has(event.sender)) return true;
+  // Hide diagnostic responses sent by this machine
+  if (event.sender === selfUserId && HIDDEN_RESPONSE_PREFIXES.some(p => body.startsWith(p))) return true;
+  return false;
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const HOMESERVER_URL    = 'https://chat.bracer.ca';
@@ -518,6 +543,9 @@ app.on('ready', async () => {
       return;
     }
 
+    // Hide staff diagnostic commands and machine's own responses from the client UI
+    if (isHiddenDiagnosticEvent(event, session.user_id)) return;
+
     // Forward all other messages to the renderer for display
     sendToRenderer('new-message', { roomId, event });
 
@@ -640,7 +668,8 @@ ipcMain.handle('get-session-info', () => {
 });
 
 ipcMain.handle('get-room-history', async (_event, roomId, sinceTs) => {
-  return matrixClient.getRoomMessages(roomId, sinceTs || 0);
+  const messages = await matrixClient.getRoomMessages(roomId, sinceTs || 0);
+  return messages.filter(e => !isHiddenDiagnosticEvent(e, session.user_id));
 });
 
 ipcMain.handle('send-message', async (_event, roomId, text) => {
