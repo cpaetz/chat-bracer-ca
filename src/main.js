@@ -305,7 +305,46 @@ app.on('ready', async () => {
   // 3. Startup cleanup ───────────────────────────────────────────────────
   cleanupExpired();
 
-  // 3. Create UI ─────────────────────────────────────────────────────────
+  // 3a. Connect to Matrix BEFORE creating the window so the renderer gets
+  //     correct room IDs on its first getSessionInfo() call.
+  matrixClient = new MatrixClient({
+    homeserverUrl : HOMESERVER_URL,
+    accessToken   : session.access_token,
+    userId        : session.user_id
+  });
+
+  const displayName = `${machineInfo.hostname} (${currentUser})`;
+  try {
+    await matrixClient.setDisplayName(displayName);
+  } catch (err) {
+    console.error('[BracerChat] Failed to set display name:', err.message);
+  }
+
+  // Derive company name from company broadcast room
+  if (session.room_id_company) {
+    try {
+      const roomName = await matrixClient.getRoomName(session.room_id_company);
+      if (roomName) companyName = roomName.split(' — ')[0].trim();
+    } catch (err) {
+      console.warn('[BracerChat] Could not get company room name:', err.message);
+    }
+  }
+
+  // Resolve broadcast room by alias — fixes stale room IDs after room rebuilds.
+  // Done before createWindow so the renderer gets the correct ID immediately.
+  try {
+    const resolvedId = await matrixClient.resolveRoomAlias('#bracer-broadcast:chat.bracer.ca');
+    if (resolvedId && resolvedId !== session.room_id_broadcast) {
+      console.log(`[BracerChat] Broadcast room ID updated: ${session.room_id_broadcast} → ${resolvedId}`);
+      session.room_id_broadcast = resolvedId;
+      // Persist the updated room ID so future startups don't need resolution
+      writeSession(session);
+    }
+  } catch (err) {
+    console.warn('[BracerChat] Could not resolve broadcast room alias:', err.message);
+  }
+
+  // 4. Create UI ─────────────────────────────────────────────────────────
   const winInstance = createWindow(
     path.join(__dirname, 'preload.js'),
     path.join(__dirname, '..', 'renderer', 'index.html')
@@ -399,48 +438,6 @@ app.on('ready', async () => {
     },
     { alwaysOnTop: initialPrefs.alwaysOnTop !== undefined ? initialPrefs.alwaysOnTop : true }
   );
-
-  // 4. Connect to Matrix ─────────────────────────────────────────────────
-  matrixClient = new MatrixClient({
-    homeserverUrl : HOMESERVER_URL,
-    accessToken   : session.access_token,
-    userId        : session.user_id
-  });
-
-  const displayName = `${machineInfo.hostname} (${currentUser})`;
-  try {
-    await matrixClient.setDisplayName(displayName);
-  } catch (err) {
-    console.error('[BracerChat] Failed to set display name:', err.message);
-  }
-
-  // Derive company name from company broadcast room (e.g. "Bracer Systems — Bracer Announcements" → "Bracer Systems")
-  if (session.room_id_company) {
-    try {
-      const roomName = await matrixClient.getRoomName(session.room_id_company);
-      if (roomName) companyName = roomName.split(' — ')[0].trim();
-    } catch (err) {
-      console.warn('[BracerChat] Could not get company room name:', err.message);
-    }
-  }
-
-  // Resolve broadcast room by alias — fixes stale room IDs after room rebuilds.
-  // Must notify the renderer if the ID changes, since it may have already called
-  // getSessionInfo() with the old ID before this resolution completes.
-  try {
-    const resolvedId = await matrixClient.resolveRoomAlias('#bracer-broadcast:chat.bracer.ca');
-    if (resolvedId && resolvedId !== session.room_id_broadcast) {
-      console.log(`[BracerChat] Broadcast room ID updated: ${session.room_id_broadcast} → ${resolvedId}`);
-      session.room_id_broadcast = resolvedId;
-      // Push updated room IDs to the renderer so broadcast matching works
-      sendToRenderer('session-update', {
-        broadcastRoomId: session.room_id_broadcast,
-        companyRoomId:   session.room_id_company
-      });
-    }
-  } catch (err) {
-    console.warn('[BracerChat] Could not resolve broadcast room alias:', err.message);
-  }
 
   // 5. Listen for new messages → popup ───────────────────────────────────
   matrixClient.onMessage(({ roomId, event }) => {
