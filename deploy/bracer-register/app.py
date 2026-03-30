@@ -845,6 +845,9 @@ async def _validate_machine_token(access_token: str, client_ip: str = "unknown")
     # Reject staff/bot accounts
     if "." in hostname or hostname in ("bracerbot", "bracer-register"):
         return None
+    # Path traversal guard: re-validate hostname before using in file paths
+    if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", hostname):
+        return None
     return hostname
 
 
