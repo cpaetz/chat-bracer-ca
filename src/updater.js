@@ -48,11 +48,10 @@ function getStageDir() {
       fs.mkdirSync(UPDATE_STAGE_DIR, { recursive: true });
     }
     return UPDATE_STAGE_DIR;
-  } catch {
-    // Fallback for pre-v1.0.62 installs where ProgramData\BracerChat\updates doesn't exist
-    // or the current user can't create it (non-admin context)
-    console.warn('[Updater] Cannot use secure staging dir, falling back to TEMP');
-    return os.tmpdir();
+  } catch (err) {
+    // M7: Fail hard instead of falling back to user-writable tmpdir —
+    // SYSTEM-scheduled tasks executing PS1 from tmpdir is a privilege escalation vector.
+    throw new Error(`[Updater] Cannot create secure staging dir ${UPDATE_STAGE_DIR}: ${err.message}. Update aborted.`);
   }
 }
 

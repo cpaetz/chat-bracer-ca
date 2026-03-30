@@ -21,7 +21,9 @@ const SESSION_PATH = 'C:\\ProgramData\\BracerChat\\session.dat';
  * Build a PS1 temp file and run it with -File to avoid Node 22 $ expansion.
  */
 function runPsSync(lines, timeout = 15_000) {
-  const tmpFile = path.join(os.tmpdir(), `bracer-cred-${Date.now()}.ps1`);
+  // Use mkdtempSync to create a unique directory — mitigates TOCTOU race
+  const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'bracer-cred-'));
+  const tmpFile = path.join(tmpDir, 'run.ps1');
   fs.writeFileSync(tmpFile, lines.join('\r\n'), 'utf8');
   try {
     return execFileSync('powershell.exe', [
@@ -29,6 +31,7 @@ function runPsSync(lines, timeout = 15_000) {
     ], { encoding: 'utf8', timeout });
   } finally {
     try { fs.unlinkSync(tmpFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }
 

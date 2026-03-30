@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bracer Chat — Installer Generator</title>
+  <title>Bracer Chat &mdash; Installer Generator</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -184,6 +186,11 @@
       }
     }
 
+    function getCsrfToken() {
+      const match = document.cookie.match(/(?:^|;\s*)bcw_csrf=([^;]+)/);
+      return match ? match[1] : '';
+    }
+
     async function generate() {
       const company = sel.value;
       if (!company) return;
@@ -196,7 +203,8 @@
       try {
         const r = await fetch('/api/installer/generate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
           body: JSON.stringify({ company })
         });
         if (!r.ok) throw new Error(`Server error: ${r.status}`);

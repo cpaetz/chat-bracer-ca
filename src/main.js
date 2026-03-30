@@ -236,7 +236,7 @@ async function renderTrayBadge(count) {
       resolve(c.toDataURL('image/png'));
     };
     img.onerror = () => resolve(null);
-    img.src = '${trayUrl}';
+    img.src = ${JSON.stringify(trayUrl)};
   })`;
   try {
     const dataUrl = await win.webContents.executeJavaScript(script);
@@ -424,12 +424,19 @@ app.on('ready', async () => {
     }
   }
 
-  // Resolve broadcast room by alias — fixes stale room IDs after room rebuilds
+  // Resolve broadcast room by alias — fixes stale room IDs after room rebuilds.
+  // Must notify the renderer if the ID changes, since it may have already called
+  // getSessionInfo() with the old ID before this resolution completes.
   try {
     const resolvedId = await matrixClient.resolveRoomAlias('#bracer-broadcast:chat.bracer.ca');
     if (resolvedId && resolvedId !== session.room_id_broadcast) {
       console.log(`[BracerChat] Broadcast room ID updated: ${session.room_id_broadcast} → ${resolvedId}`);
       session.room_id_broadcast = resolvedId;
+      // Push updated room IDs to the renderer so broadcast matching works
+      sendToRenderer('session-update', {
+        broadcastRoomId: session.room_id_broadcast,
+        companyRoomId:   session.room_id_company
+      });
     }
   } catch (err) {
     console.warn('[BracerChat] Could not resolve broadcast room alias:', err.message);
@@ -573,6 +580,7 @@ app.on('ready', async () => {
     if (isHiddenDiagnosticEvent(event, session.user_id)) return;
 
     // Forward all other messages to the renderer for display
+    console.log('[BracerChat] forwarding to renderer — roomId:', roomId, 'type:', event.type, 'sender:', event.sender, 'eventId:', event.event_id);
     sendToRenderer('new-message', { roomId, event });
 
     // Never pop up for messages sent by this device
@@ -580,7 +588,7 @@ app.on('ready', async () => {
 
     // Popup for machine room and broadcast rooms
     const isBroadcast = roomId === session.room_id_broadcast || roomId === session.room_id_company;
-    if (isBroadcast) console.log('[BracerChat] broadcast event type:', event.type, 'roomId:', roomId);
+    if (isBroadcast) console.log('[BracerChat] broadcast match — broadcastId:', session.room_id_broadcast, 'companyId:', session.room_id_company, 'eventRoomId:', roomId);
     if (roomId === session.room_id_machine || isBroadcast) {
       const prefs = readWindowPrefs();
       const onTop = prefs.alwaysOnTop !== undefined ? prefs.alwaysOnTop : true;
@@ -677,6 +685,29 @@ async function checkUserChange() {
   }
 }
 
+// ── IPC helpers ────────────────────────────────────────────────────────────
+
+/** Validate that a roomId is one of the session's authorised rooms. */
+function isAuthorisedRoom(roomId) {
+  if (!session || typeof roomId !== 'string') return false;
+  return roomId === session.room_id_machine ||
+         roomId === session.room_id_broadcast ||
+         roomId === session.room_id_company;
+}
+
+/** IPC rate limiter — keyed by channel name, configurable per-channel. */
+const _ipcRateLimits = {};
+function ipcRateLimit(channel, maxPerSec = 5) {
+  const now = Date.now();
+  if (!_ipcRateLimits[channel]) _ipcRateLimits[channel] = [];
+  const calls = _ipcRateLimits[channel];
+  // Purge entries older than 1 second
+  while (calls.length && calls[0] < now - 1000) calls.shift();
+  if (calls.length >= maxPerSec) return false; // rate limited
+  calls.push(now);
+  return true;
+}
+
 // ── IPC handlers ───────────────────────────────────────────────────────────
 
 ipcMain.handle('get-session-info', () => {
@@ -694,27 +725,44 @@ ipcMain.handle('get-session-info', () => {
 });
 
 ipcMain.handle('get-room-history', async (_event, roomId, sinceTs) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
   const messages = await matrixClient.getRoomMessages(roomId, sinceTs || 0);
   return messages.filter(e => !isHiddenDiagnosticEvent(e, session.user_id));
 });
 
 ipcMain.handle('send-message', async (_event, roomId, text) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!ipcRateLimit('send-message', 5)) throw new Error('Rate limited');
   await matrixClient.sendMessage(roomId, text);
 });
 
 ipcMain.handle('send-reply', async (_event, roomId, text, replyToEvent) => {
-  await matrixClient.sendReply(roomId, text, replyToEvent);
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!ipcRateLimit('send-reply', 5)) throw new Error('Rate limited');
+  // Only pass the fields we actually need from the reply event
+  const safeReply = {
+    event_id: replyToEvent?.event_id,
+    sender: replyToEvent?.sender,
+    content: { body: replyToEvent?.content?.body || '[attachment]' }
+  };
+  await matrixClient.sendReply(roomId, text, safeReply);
 });
 
 ipcMain.handle('send-poll-response', async (_event, roomId, pollEventId, answerId) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!ipcRateLimit('send-poll-response', 3)) throw new Error('Rate limited');
   await matrixClient.sendPollResponse(roomId, pollEventId, answerId);
 });
 
 ipcMain.handle('send-typing', async (_event, roomId, typing) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!ipcRateLimit('send-typing', 2)) return; // silently drop excess typing
   await matrixClient.sendTyping(roomId, typing);
 });
 
 ipcMain.handle('send-read-receipt', async (_event, roomId, eventId) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!ipcRateLimit('send-read-receipt', 3)) return; // silently drop
   await matrixClient.sendReadReceipt(roomId, eventId);
 });
 
@@ -743,6 +791,8 @@ ipcMain.handle('open-file-dialog', async () => {
 });
 
 ipcMain.handle('send-file', async (_event, roomId, fileData, fileName, mimeType) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!ipcRateLimit('send-file', 2)) throw new Error('Rate limited');
   const buf          = Buffer.from(fileData);
   if (buf.length > MAX_FILE_BYTES) {
     throw new Error(`File exceeds 100 MB limit (${(buf.length / 1024 / 1024).toFixed(1)} MB)`);
@@ -784,6 +834,7 @@ ipcMain.handle('get-screens', async () => {
 });
 
 ipcMain.handle('send-screenshot', async (_event, roomId, sourceId) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
   // Use WDA_EXCLUDEFROMCAPTURE to exclude this window from the DWM capture
   // pipeline — window stays visible to the user but is absent from the screenshot.
   const winRef = require('./window').getWindow();
@@ -837,11 +888,19 @@ ipcMain.handle('clipboard-write', (_event, text) => {
 });
 
 ipcMain.handle('clipboard-write-image', (_event, dataUrl) => {
+  // L6: Validate data URL format and enforce size limit (10 MB) to prevent memory exhaustion
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) throw new Error('Invalid image data URL');
+  const MAX_DATA_URL_BYTES = 10 * 1024 * 1024;
+  if (dataUrl.length > MAX_DATA_URL_BYTES) throw new Error('Image data too large for clipboard');
   const img = nativeImage.createFromDataURL(dataUrl);
   clipboard.writeImage(img);
 });
 
 ipcMain.handle('save-text-file', async (_event, { content, defaultName, filters }) => {
+  // M6: Validate content — size limit and basic format check
+  if (typeof content !== 'string') throw new Error('Invalid content');
+  const MAX_EXPORT_BYTES = 10 * 1024 * 1024; // 10 MB
+  if (Buffer.byteLength(content, 'utf8') > MAX_EXPORT_BYTES) throw new Error('Export too large (max 10 MB)');
   const { filePath, canceled } = await dialog.showSaveDialog({
     title      : 'Export Chat',
     defaultPath: path.join(os.homedir(), 'Downloads', defaultName || 'export.html'),
@@ -862,9 +921,15 @@ ipcMain.handle('open-external', (_event, url) => {
 });
 
 // Open an image in the default OS photo app — saves to temp, no Save As prompt
+// L2: Restrict to known image extensions to prevent OS handler abuse
+const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.svg', '.heic']);
+
 ipcMain.handle('open-image-in-app', async (_event, mxcUri, fileName) => {
   const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
-  const tmpPath  = path.join(os.tmpdir(), `bracer-img-${Date.now()}-${safeName}`);
+  const ext = path.extname(safeName).toLowerCase();
+  // Force .png if the extension is not a known image type
+  const safeFinal = ALLOWED_IMAGE_EXTS.has(ext) ? safeName : safeName + '.png';
+  const tmpPath   = path.join(os.tmpdir(), `bracer-img-${Date.now()}-${safeFinal}`);
   const { buffer } = await matrixClient.fetchMedia(mxcUri);
   fs.writeFileSync(tmpPath, buffer);
   await shell.openPath(tmpPath);
@@ -907,15 +972,19 @@ ipcMain.handle('read-clipboard-image', () => {
 
 // Fetch a single Matrix event by ID (used to resolve pinned event details)
 ipcMain.handle('get-room-event', async (_event, roomId, eventId) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
   return matrixClient.getEvent(roomId, eventId);
 });
 
 // Pinned events — read from / write to Matrix m.room.pinned_events state
 ipcMain.handle('get-pinned-events', async (_event, roomId) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
   return matrixClient.getPinnedEvents(roomId);
 });
 
 ipcMain.handle('set-pinned-events', async (_event, roomId, pinnedIds) => {
+  if (!isAuthorisedRoom(roomId)) throw new Error('Unauthorised room');
+  if (!Array.isArray(pinnedIds)) throw new Error('Invalid pinnedIds');
   return matrixClient.setPinnedEvents(roomId, pinnedIds);
 });
 

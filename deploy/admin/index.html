@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https://chat.bracer.ca data:; connect-src 'self';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Bracer Chat Dashboard</title>
 <style>
@@ -410,7 +412,7 @@
         '<span class="company-name">' + esc(coName) + '</span>' +
         '<span class="company-count">' + co.online_count + '/' + co.machines.length + ' online</span>' +
         '<div class="company-actions">' +
-          (co.room_id ? '<a href="' + ELEMENT_URL + '/#/room/' + co.room_id + '" target="_blank" class="btn btn-sm btn-ghost" title="Open in Element" onclick="event.stopPropagation()">Open Room</a>' : '') +
+          (co.room_id ? '<a href="' + ELEMENT_URL + '/#/room/' + encodeURIComponent(co.room_id) + '" target="_blank" class="btn btn-sm btn-ghost" title="Open in Element" onclick="event.stopPropagation()">Open Room</a>' : '') +
         '</div>';
 
       var machineDiv = document.createElement('div');
@@ -426,7 +428,7 @@
           '<span class="machine-hostname">' + esc(m.hostname) + '</span>' +
           '<span class="machine-meta">' + (m.online ? 'Online' : lastStr) + '</span>' +
           '<div class="machine-links">' +
-            (m.machine_room ? '<a href="' + ELEMENT_URL + '/#/room/' + m.machine_room + '" target="_blank" onclick="event.stopPropagation()">Chat</a>' : '') +
+            (m.machine_room ? '<a href="' + ELEMENT_URL + '/#/room/' + encodeURIComponent(m.machine_room) + '" target="_blank" onclick="event.stopPropagation()">Chat</a>' : '') +
           '</div>';
         item.onclick = function(e) {
           if (e.target.tagName === 'A') return;
@@ -478,10 +480,10 @@
       '<div class="detail-actions">';
 
     if (m.machine_room) {
-      html += '<a href="' + ELEMENT_URL + '/#/room/' + m.machine_room + '" target="_blank" class="btn btn-sm btn-primary">Open Chat in Element</a>';
+      html += '<a href="' + ELEMENT_URL + '/#/room/' + encodeURIComponent(m.machine_room) + '" target="_blank" class="btn btn-sm btn-primary">Open Chat in Element</a>';
     }
     if (m.company_room) {
-      html += '<a href="' + ELEMENT_URL + '/#/room/' + m.company_room + '" target="_blank" class="btn btn-sm btn-ghost">Company Room</a>';
+      html += '<a href="' + ELEMENT_URL + '/#/room/' + encodeURIComponent(m.company_room) + '" target="_blank" class="btn btn-sm btn-ghost">Company Room</a>';
     }
     html += '</div>';
 

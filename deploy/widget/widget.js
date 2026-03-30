@@ -591,7 +591,10 @@
       session = data;
       isConnecting = false;
 
-      // Save to sessionStorage so refresh doesn't lose chat
+      // Save to sessionStorage so refresh doesn't lose chat.
+      // SECURITY NOTE: any script on the embedding origin can read this token.
+      // Guest tokens are short-lived and scoped to a single room, limiting exposure.
+      // The server should enforce Origin validation on /api/guest/start.
       try { sessionStorage.setItem("bcw_session", JSON.stringify(session)); } catch(e) {}
 
       showChatUI();

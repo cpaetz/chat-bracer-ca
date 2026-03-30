@@ -71,9 +71,16 @@ function Install-OpCli {
         New-Item -Path $OpTempDir -ItemType Directory -Force | Out-Null
         Log-Message "Downloading 1Password CLI..."
         Invoke-WebRequest -Uri $OpCliUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
+        # L3: Verify SHA256 hash of downloaded 1Password CLI binary
+        $ExpectedHash = 'B98A98098F49FCBBA75D0FF5E13D582688BA6E28BF7BB4FEFA11D3B226E5C893'
+        $ActualHash   = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash
+        if ($ActualHash -ne $ExpectedHash) {
+            Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+            throw "1Password CLI hash mismatch! Expected $ExpectedHash, got $ActualHash"
+        }
         Expand-Archive -Path $ZipPath -DestinationPath $OpTempDir -Force -ErrorAction Stop
         Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
-        Log-Message "1Password CLI ready."
+        Log-Message "1Password CLI ready (hash verified)."
     } catch {
         Log-Message "Failed to download 1Password CLI: $($_.Exception.Message)" -Level 'ERROR'
         throw

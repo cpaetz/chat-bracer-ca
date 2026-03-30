@@ -121,6 +121,14 @@ contextBridge.exposeInMainWorld('bracerChat', {
     ipcRenderer.on('focus-message', (_event, data) => callback(data));
   },
 
+  /**
+   * Called when session room IDs are updated after init (e.g. broadcast room
+   * alias resolution). Renderer should update its cached sessionInfo.
+   */
+  onSessionUpdate: (callback) => {
+    ipcRenderer.on('session-update', (_event, data) => callback(data));
+  },
+
   // ── Typing indicators ─────────────────────────────────────────────────
   /** Send typing notification. @param {boolean} typing */
   sendTyping: (roomId, typing) => ipcRenderer.invoke('send-typing', roomId, typing),

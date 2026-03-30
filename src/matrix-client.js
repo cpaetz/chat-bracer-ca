@@ -78,7 +78,15 @@ class MatrixClient {
         res.on('end', () => {
           const raw = Buffer.concat(chunks).toString('utf8');
           if (res.statusCode >= 400) {
-            reject(new Error(`Matrix ${res.statusCode}: ${raw.slice(0, 300)}`));
+            // Sanitize: only include Matrix error code, not full response body
+            // (server responses may contain internal details that get logged/uploaded)
+            let errMsg = `Matrix ${res.statusCode}`;
+            try {
+              const errJson = JSON.parse(raw);
+              if (errJson.errcode) errMsg += ` ${errJson.errcode}`;
+              if (errJson.error)   errMsg += `: ${errJson.error.slice(0, 120)}`;
+            } catch { errMsg += ` (non-JSON response, ${raw.length} bytes)`; }
+            reject(new Error(errMsg));
             return;
           }
           try   { resolve(JSON.parse(raw)); }

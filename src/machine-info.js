@@ -21,7 +21,9 @@ const fs   = require('fs');
  * in -Command arguments before they reach PowerShell.
  */
 function runPsScript(scriptLines, opts = {}) {
-  const tmpFile = path.join(os.tmpdir(), `bracer-ps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`);
+  // Use mkdtempSync to create a unique directory — mitigates TOCTOU race
+  const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'bracer-ps-'));
+  const tmpFile = path.join(tmpDir, 'run.ps1');
   const content = '$ProgressPreference = "SilentlyContinue"\r\n' + scriptLines.join('\r\n');
   fs.writeFileSync(tmpFile, content, 'utf8');
   try {
@@ -31,11 +33,13 @@ function runPsScript(scriptLines, opts = {}) {
     return out;
   } finally {
     try { fs.unlinkSync(tmpFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }
 
 async function runPsScriptAsync(scriptLines, opts = {}) {
-  const tmpFile = path.join(os.tmpdir(), `bracer-ps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`);
+  const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'bracer-ps-'));
+  const tmpFile = path.join(tmpDir, 'run.ps1');
   const content = '$ProgressPreference = "SilentlyContinue"\r\n' + scriptLines.join('\r\n');
   fs.writeFileSync(tmpFile, content, 'utf8');
   try {
@@ -45,6 +49,7 @@ async function runPsScriptAsync(scriptLines, opts = {}) {
     return result;
   } finally {
     try { fs.unlinkSync(tmpFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }
 
