@@ -835,13 +835,14 @@ async function handleIncomingMessage({ roomId, event }) {
   const isOwn = sessionInfo && event.sender === sessionInfo.userId;
   if (!isOwn) playNotificationSound();
 
+  const wasNearBottom = isNearBottom();
   if (POLL_START_TYPES.includes(event.type)) {
     renderPoll(event);
   } else {
     renderMessage(event);
   }
   applySearch();
-  scrollToBottom();
+  scrollToBottom(wasNearBottom);
   // Schedule a delayed read receipt if the window is visible
   if (!document.hidden && event.event_id) {
     scheduleReadReceipt();
