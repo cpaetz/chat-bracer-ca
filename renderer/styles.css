@@ -21,6 +21,7 @@
   --color-warn-bg       : #FFEBEE;
   --color-warn-text     : #C62828;
   --color-warn-border   : #FFCDD2;
+  --color-broadcast-text: #4a1a1a;
 }
 
 /* ── Dark mode — auto-detected from system setting ───────────────────── */
@@ -40,6 +41,7 @@
     --color-warn-bg       : #3c1a1a;
     --color-warn-text     : #ff8a80;
     --color-warn-border   : #5c2a2a;
+    --color-broadcast-text: #ffffff;
   }
 
   /* Dark mode overrides for elements that use hardcoded colors */
@@ -68,8 +70,6 @@
   #screen-picker-cancel { color: var(--color-text-secondary); border-color: var(--color-border); }
   #screen-picker-cancel:hover { background: var(--color-bg); }
   .broadcast-box { background: #2a1a1a; border-color: #c62828; }
-  .broadcast-body { color: #ffffff !important; }
-  .broadcast-body a { color: #ff6b6b !important; }
   .broadcast-label { color: #ff6b6b; }
   mark.search-highlight { background: #5c4a00; }
   mark.search-highlight.active { background: #f8941b; color: #121212; }
@@ -863,7 +863,7 @@ mark.search-highlight.active {
 
 .broadcast-body {
   font-size  : 14px;
-  color      : #4a1a1a;
+  color      : var(--color-broadcast-text, #4a1a1a);
   white-space: pre-wrap;
   word-break : break-word;
   line-height: 1.45;
