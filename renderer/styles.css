@@ -68,7 +68,8 @@
   #screen-picker-cancel { color: var(--color-text-secondary); border-color: var(--color-border); }
   #screen-picker-cancel:hover { background: var(--color-bg); }
   .broadcast-box { background: #2a1a1a; border-color: #c62828; }
-  .broadcast-body { color: #ff6b6b; }
+  .broadcast-body { color: #ffffff; }
+  .broadcast-body a { color: #ff6b6b; }
   .broadcast-label { color: #ff6b6b; }
   mark.search-highlight { background: #5c4a00; }
   mark.search-highlight.active { background: #f8941b; color: #121212; }
