@@ -7,14 +7,18 @@
   ; Set HKLM Run key so the app auto-starts for every user that logs in
   WriteRegStr HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Bracer Chat" "$\"$INSTDIR\Bracer Chat.exe$\" --startup"
 
-  ; Grant BUILTIN\Users modify rights on app.asar so the in-app updater can
-  ; replace it as the logged-in user without elevation or a SYSTEM task.
-  nsExec::ExecToLog 'icacls "$INSTDIR\resources\app.asar" /grant "*S-1-5-32-545:(M)" /Q'
+  ; app.asar is now updated via SYSTEM scheduled task — no Users modify needed.
+  ; (Removed icacls grant on app.asar — closes H2 security finding)
 
   ; Grant BUILTIN\Users modify rights on the ProgramData directory so the app
   ; can write window-prefs.json, update logs, etc. without elevation.
   CreateDirectory "C:\ProgramData\BracerChat"
   nsExec::ExecToLog 'icacls "C:\ProgramData\BracerChat" /grant "*S-1-5-32-545:(OI)(CI)(M)" /Q'
+
+  ; Create secure staging directory for updates — SYSTEM-only, no user write access.
+  ; This prevents TOCTOU attacks on update files between download and execution.
+  CreateDirectory "C:\ProgramData\BracerChat\updates"
+  nsExec::ExecToLog 'icacls "C:\ProgramData\BracerChat\updates" /inheritance:r /grant "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /Q'
 
   ; Register watchdog scheduled task via base64-encoded PowerShell command.
   ; Task runs every 15 min for any logged-in user (GroupId = BUILTIN\Users).

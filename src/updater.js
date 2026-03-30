@@ -38,6 +38,24 @@ const SIGNING_PUBLIC_KEY = (() => {
 const APP_EXE      = 'C:\\Program Files\\Bracer Chat\\Bracer Chat.exe';
 const ASAR_DST     = 'C:\\Program Files\\Bracer Chat\\resources\\app.asar';
 
+// Secure staging directory — SYSTEM-writable only (created by installer.nsh with restricted ACLs).
+// Falls back to os.tmpdir() if the directory doesn't exist (pre-v1.0.62 installs).
+const UPDATE_STAGE_DIR = 'C:\\ProgramData\\BracerChat\\updates';
+
+function getStageDir() {
+  try {
+    if (!fs.existsSync(UPDATE_STAGE_DIR)) {
+      fs.mkdirSync(UPDATE_STAGE_DIR, { recursive: true });
+    }
+    return UPDATE_STAGE_DIR;
+  } catch {
+    // Fallback for pre-v1.0.62 installs where ProgramData\BracerChat\updates doesn't exist
+    // or the current user can't create it (non-admin context)
+    console.warn('[Updater] Cannot use secure staging dir, falling back to TEMP');
+    return os.tmpdir();
+  }
+}
+
 // ── Signature verification ───────────────────────────────────────────────────
 
 /**
@@ -187,9 +205,9 @@ function registerSystemTask(taskName, ps1Path, onSuccess) {
  * copies the new asar, then relaunches the app via Start-Process.
  */
 async function downloadAndInstallAsar(accessToken) {
-  const tmpDir  = os.tmpdir();
-  const asarTmp = path.join(tmpDir, 'BracerChatUpdate.asar');
-  const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
+  const stageDir = getStageDir();
+  const asarTmp  = path.join(stageDir, 'BracerChatUpdate.asar');
+  const ps1Path  = path.join(stageDir, 'BracerChatUpdateAsar.ps1');
 
   // Download ASAR and its signature, then verify before proceeding
   const signature = await downloadSignature(ASAR_URL, accessToken);
@@ -243,25 +261,23 @@ async function downloadAndInstallAsar(accessToken) {
     `    $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`,
     `    Add-Content -Path $log -Value "$ts [Updater] All copy attempts failed. Aborting relaunch."`,
     '} else {',
-    '    if (Test-Path $app) { Start-Process -FilePath $app -ArgumentList \'--startup\' }',
+    // Relaunch as the logged-in user via a one-shot interactive scheduled task
+    // (SYSTEM session cannot launch UI apps directly)
+    ...relaunchPs1Block('BracerChatRelaunchAsar'),
     '}',
+    // Clean up the scheduled task and the PS1 itself
+    "schtasks /delete /tn 'BracerChatUpdateAsar' /f 2>&1 | Out-Null",
     'Remove-Item -Force $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue',
   ];
 
   fs.writeFileSync(ps1Path, ps1Lines.join('\r\n'), 'utf8');
 
-  // Use Start-Process to launch the PS1 as a fully independent OS process.
-  // The outer PowerShell calls Start-Process (which returns immediately) and
-  // exits. The inner PowerShell is parented to the OS, not Electron, so it
-  // survives app.quit(). No admin / scheduled task required.
-  const ps1PathEsc = ps1Path.replace(/\\/g, '\\\\').replace(/'/g, "''");
-  spawn('powershell.exe', [
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-    `Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${ps1PathEsc}""' -WindowStyle Hidden`
-  ], { stdio: 'ignore', windowsHide: true }).on('close', (code) => {
-    console.log(`[Updater] ASAR update process launched (exit ${code}). Quitting in 1.5 s...`);
-    setTimeout(() => app.quit(), 1500);
-  });
+  // Use a SYSTEM scheduled task to run the PS1 — this allows the copy to
+  // succeed even without BUILTIN\Users modify rights on app.asar.
+  // Falls back to a direct user-level spawn if schtasks fails (pre-v1.0.62
+  // installs where Users still has modify on app.asar).
+  const TASK = 'BracerChatUpdateAsar';
+  registerSystemTask(TASK, ps1Path, () => setTimeout(() => app.quit(), 1500));
 }
 
 // ── Full installer update ────────────────────────────────────────────────────
@@ -271,9 +287,9 @@ async function downloadAndInstallAsar(accessToken) {
  * Used only when Electron binary or native deps change version.
  */
 async function downloadAndInstallFull(accessToken) {
-  const tmpDir  = os.tmpdir();
-  const exePath = path.join(tmpDir, 'BracerChatUpdate.exe');
-  const ps1Path = path.join(tmpDir, 'BracerChatUpdate.ps1');
+  const stageDir = getStageDir();
+  const exePath  = path.join(stageDir, 'BracerChatUpdate.exe');
+  const ps1Path  = path.join(stageDir, 'BracerChatUpdateFull.ps1');
   const TASK    = 'BracerChatUpdate';
 
   // Download installer and its signature, then verify before proceeding

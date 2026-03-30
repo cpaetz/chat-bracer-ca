@@ -310,6 +310,11 @@
   var searchQuery = '';
   var ELEMENT_URL = 'https://chat.bracer.ca';
 
+  function getCsrfToken() {
+    var match = document.cookie.match(/(?:^|;\s*)bcw_csrf=([^;]+)/);
+    return match ? match[1] : '';
+  }
+
   function init() {
     fetch('/api/admin/status', { credentials: 'same-origin' })
       .then(function(r) {
@@ -526,7 +531,7 @@
     updateHolidayLabel(enabled);
     fetch('/api/admin/holiday', {
       method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
       body: JSON.stringify({ enabled: enabled })
     }).then(function(r) {
       if (!r.ok) throw new Error();
@@ -539,7 +544,7 @@
     var enabled = document.getElementById('holiday-toggle').checked;
     fetch('/api/admin/holiday', {
       method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
       body: JSON.stringify({ enabled: enabled, message: msg })
     }).then(function(r) {
       if (!r.ok) throw new Error();
@@ -554,7 +559,7 @@
     if (!confirm('Send this broadcast message?')) return;
     fetch('/api/admin/broadcast', {
       method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
       body: JSON.stringify({ message: msg, target: target })
     }).then(function(r) {
       if (!r.ok) throw new Error();

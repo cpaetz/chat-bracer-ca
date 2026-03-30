@@ -255,13 +255,13 @@ function Invoke-AsarUpdate {
 
     Log-Message "app.asar replaced successfully."
 
-    # Grant BUILTIN\Users modify rights on app.asar so the in-app updater
-    # can replace it as the logged-in user without elevation going forward.
+    # app.asar is now updated via SYSTEM scheduled task — no Users modify needed.
+    # Remove any legacy Users modify ACL on app.asar (security hardening H2).
     try {
-        icacls $AsarDest /grant '*S-1-5-32-545:(M)' /Q | Out-Null
-        Log-Message "Granted Users modify rights on app.asar."
+        icacls $AsarDest /remove '*S-1-5-32-545' /Q | Out-Null
+        Log-Message "Removed Users modify rights on app.asar (SYSTEM task handles updates now)."
     } catch {
-        Log-Message "icacls grant failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
+        Log-Message "icacls remove on app.asar failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
     }
 
     # Grant BUILTIN\Users modify rights on ProgramData\BracerChat so the app
@@ -273,6 +273,16 @@ function Invoke-AsarUpdate {
         Log-Message "Granted Users modify rights on $DataDir."
     } catch {
         Log-Message "icacls on data dir failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
+    }
+
+    # Create secure staging directory for in-app updates — SYSTEM-only, no user write.
+    $UpdateDir = 'C:\ProgramData\BracerChat\updates'
+    if (-not (Test-Path $UpdateDir)) { New-Item -Path $UpdateDir -ItemType Directory -Force | Out-Null }
+    try {
+        icacls $UpdateDir /inheritance:r /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' /Q | Out-Null
+        Log-Message "Secure updates directory created at $UpdateDir."
+    } catch {
+        Log-Message "icacls on updates dir failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
     }
 
     Start-BracerChatAsUser

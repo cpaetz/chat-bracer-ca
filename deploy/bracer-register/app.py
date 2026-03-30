@@ -592,9 +592,24 @@ async def installer_generate(body: InstallerGenerateRequest):
     return {"token": token, "company": body.company, "expires_at": expires}
 
 
-@app.get("/api/installer/claim")
-async def installer_claim(request: Request, token: str, hostname: str):
-    """Validate token and register a machine. Called by the NSIS EXE on client machines."""
+@app.api_route("/api/installer/claim", methods=["GET", "POST"])
+async def installer_claim(request: Request, token: str = "", hostname: str = ""):
+    """Validate token and register a machine. Called by the NSIS EXE on client machines.
+    Accepts POST with JSON body {"token": "...", "hostname": "..."} (preferred)
+    or GET with query params (deprecated — token leaks into Caddy logs)."""
+    # POST with JSON body (preferred)
+    if request.method == "POST" and not token:
+        try:
+            body = await request.json()
+            token = str(body.get("token", ""))
+            hostname = str(body.get("hostname", ""))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+    elif request.method == "GET":
+        logger.warning(f"DEPRECATED: /api/installer/claim called via GET (token in URL). ip={request.client.host}")
+
+    if not token or not hostname:
+        raise HTTPException(status_code=400, detail="Missing token or hostname")
     if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", hostname):
         raise HTTPException(status_code=400, detail="Invalid hostname")
     hostname = hostname.lower()
@@ -676,9 +691,19 @@ async def installer_claim(request: Request, token: str, hostname: str):
     }
 
 
-@app.get("/api/installer/app")
-async def installer_app(token: str):
-    """Stream the BracerChat installer EXE. Called by the NSIS EXE on client machines."""
+@app.api_route("/api/installer/app", methods=["GET", "POST"])
+async def installer_app(request: Request, token: str = ""):
+    """Stream the BracerChat installer EXE. Called by the NSIS EXE on client machines.
+    Accepts POST with JSON body {"token": "..."} (preferred)
+    or GET with query param (deprecated)."""
+    if request.method == "POST" and not token:
+        try:
+            body = await request.json()
+            token = str(body.get("token", ""))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing token")
     row = _get_installer_token(token)
     if not row:
         raise HTTPException(status_code=404, detail="Token not found")
@@ -1222,8 +1247,9 @@ def _save_holiday_config(config: dict):
         json.dump(config, f, indent=2)
 
 
-async def _validate_admin_session(request: Request) -> str:
-    """Validate admin session cookie. Returns user_id or raises 401."""
+async def _validate_admin_session(request: Request, check_csrf: bool = False) -> str:
+    """Validate admin session cookie. Returns user_id or raises 401.
+    If check_csrf=True, also validates the X-CSRF-Token header (for POST endpoints)."""
     # Periodic cleanup of expired admin sessions
     global _admin_session_last_cleanup
     now = time.time()
@@ -1242,6 +1268,15 @@ async def _validate_admin_session(request: Request) -> str:
     if now > session["expires"]:
         del ADMIN_SESSION_STORE[session_id]
         raise HTTPException(status_code=401, detail="Session expired")
+
+    # CSRF validation for state-changing (POST) requests
+    if check_csrf:
+        csrf_header = request.headers.get("X-CSRF-Token", "")
+        csrf_expected = session.get("csrf_token", "")
+        if not csrf_expected or not secrets.compare_digest(csrf_header, csrf_expected):
+            logger.warning(f"CSRF validation failed for {session['user_id']}")
+            raise HTTPException(status_code=403, detail="CSRF validation failed")
+
     return session["user_id"]
 
 
@@ -1294,10 +1329,12 @@ async def admin_callback(loginToken: str = ""):
 
     # Create admin session
     session_id = secrets.token_hex(32)
+    csrf_token = secrets.token_hex(32)
     ADMIN_SESSION_STORE[session_id] = {
         "user_id": user_id,
         "access_token": access_token,
         "expires": time.time() + ADMIN_SESSION_TTL,
+        "csrf_token": csrf_token,
     }
 
     logger.info(f"Admin login: {user_id}")
@@ -1306,6 +1343,15 @@ async def admin_callback(loginToken: str = ""):
         key="bcw_admin",
         value=session_id,
         httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=ADMIN_SESSION_TTL,
+    )
+    # CSRF token cookie — readable by JS (not httponly) for double-submit pattern
+    response.set_cookie(
+        key="bcw_csrf",
+        value=csrf_token,
+        httponly=False,
         secure=True,
         samesite="lax",
         max_age=ADMIN_SESSION_TTL,
@@ -1448,7 +1494,7 @@ async def admin_status(request: Request):
 @app.post("/api/admin/holiday")
 async def admin_holiday(request: Request):
     """Toggle holiday mode and/or set message."""
-    user_id = await _validate_admin_session(request)
+    user_id = await _validate_admin_session(request, check_csrf=True)
     body = await request.json()
 
     config = _load_holiday_config()
@@ -1465,7 +1511,7 @@ async def admin_holiday(request: Request):
 @app.post("/api/admin/broadcast")
 async def admin_broadcast(request: Request):
     """Send a broadcast message to a company room or all clients."""
-    user_id = await _validate_admin_session(request)
+    user_id = await _validate_admin_session(request, check_csrf=True)
     session_id = request.cookies.get("bcw_admin")
     session = ADMIN_SESSION_STORE.get(session_id, {})
     access_token = session.get("access_token", "")

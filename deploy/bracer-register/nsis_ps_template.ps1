@@ -23,9 +23,10 @@ function Write-Log {
 try {
     Write-Log "BracerChat installer started. Hostname: $hostname"
 
-    # 1. Claim credentials from server
+    # 1. Claim credentials from server (POST with JSON body — token not in URL)
     Write-Log "Claiming credentials..."
-    $resp = Invoke-RestMethod -Uri "${claimUrl}?token=${token}&hostname=${hostname}" -Method GET -UseBasicParsing
+    $claimBody = @{ token = $token; hostname = $hostname } | ConvertTo-Json -Compress
+    $resp = Invoke-RestMethod -Uri $claimUrl -Method POST -Body $claimBody -ContentType 'application/json' -UseBasicParsing
     Write-Log "Credentials received for $($resp.user_id)"
 
     # 2. Build session.dat JSON
@@ -64,10 +65,11 @@ try {
     Get-Process -Name "Bracer Chat" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 
-    # 6. Download BracerChat installer
+    # 6. Download BracerChat installer (POST with JSON body — token not in URL)
     Write-Log "Downloading BracerChat installer..."
     $installer = Join-Path $env:TEMP 'BracerChatSetup.exe'
-    Invoke-WebRequest -Uri "${appUrl}?token=${token}" -OutFile $installer -UseBasicParsing
+    $appBody = @{ token = $token } | ConvertTo-Json -Compress
+    Invoke-WebRequest -Uri $appUrl -Method POST -Body $appBody -ContentType 'application/json' -OutFile $installer -UseBasicParsing
     $sizeMB = [math]::Round((Get-Item $installer).Length / 1MB, 1)
     Write-Log "Download complete ($sizeMB MB)"
 

@@ -46,7 +46,7 @@ function createWindow(preloadPath, htmlPath) {
       preload          : preloadPath,
       contextIsolation : true,
       nodeIntegration  : false,
-      sandbox          : false   // Required so preload can use require/ipcRenderer
+      sandbox          : true    // Preload only uses contextBridge + ipcRenderer (both work in sandbox since Electron 20)
     }
   });
 
