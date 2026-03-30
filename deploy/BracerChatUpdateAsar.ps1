@@ -275,6 +275,17 @@ function Invoke-AsarUpdate {
         Log-Message "icacls on data dir failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
     }
 
+    # Fix MediaCache ACLs — early installs may have created this dir with Users:(R) only.
+    $CacheDir = 'C:\ProgramData\BracerChat\MediaCache'
+    if (Test-Path $CacheDir) {
+        try {
+            icacls $CacheDir /grant '*S-1-5-32-545:(OI)(CI)(M)' /Q | Out-Null
+            Log-Message "Granted Users modify rights on $CacheDir."
+        } catch {
+            Log-Message "icacls on MediaCache failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
+        }
+    }
+
     # Create secure staging directory for in-app updates — SYSTEM-only, no user write.
     $UpdateDir = 'C:\ProgramData\BracerChat\updates'
     if (-not (Test-Path $UpdateDir)) { New-Item -Path $UpdateDir -ItemType Directory -Force | Out-Null }
