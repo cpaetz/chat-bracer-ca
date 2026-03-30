@@ -57,10 +57,13 @@ RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_COOLDOWN = 1800  # 30 minutes cooldown after hitting limit
 RATE_LIMIT_AUTH_MAX = 60    # Higher limit for authenticated endpoints (update/logs)
 RATE_LIMIT_AUTH_WINDOW = 300  # 5-minute window for auth endpoints
+RATE_LIMIT_MAX_IPS = 10000  # Max tracked IPs before forced cleanup
 _rate_store: dict = defaultdict(list)
 _rate_store_auth: dict = defaultdict(list)  # Separate store for authenticated endpoints
 _rate_cooldown: dict = {}  # ip -> cooldown_expires_at
 _rate_lock = asyncio.Lock()
+_rate_last_cleanup = 0.0  # monotonic timestamp of last cleanup
+RATE_CLEANUP_INTERVAL = 300  # cleanup stale entries every 5 min
 
 # Endpoints that are public-facing and need tight rate limits
 _PUBLIC_RATE_PATHS = {"/api/register", "/api/companies", "/api/installer/claim", "/api/guest/start"}
@@ -70,6 +73,7 @@ _AUTH_RATE_PREFIXES = ("/api/update/", "/api/logs/", "/api/guest/heartbeat")
 # Auth failure tracking for helpdesk alerting
 AUTH_FAIL_THRESHOLD = 10      # failures per window before alerting
 AUTH_FAIL_WINDOW    = 300     # 5-minute window
+AUTH_FAIL_MAX_IPS   = 5000    # Max tracked IPs before forced cleanup
 _auth_fail_store: dict = defaultdict(list)
 _auth_fail_alerted: dict = {}  # ip -> last alert time
 
@@ -137,6 +141,19 @@ async def rate_limit(request: Request, call_next):
         ip = request.client.host
         now = time.monotonic()
         async with _rate_lock:
+            # Periodic cleanup of stale entries to prevent unbounded dict growth
+            global _rate_last_cleanup
+            if now - _rate_last_cleanup > RATE_CLEANUP_INTERVAL or len(_rate_store) > RATE_LIMIT_MAX_IPS:
+                _rate_store.update({k: [t for t in v if now - t < RATE_LIMIT_WINDOW] for k, v in _rate_store.items()})
+                for k in [k for k, v in _rate_store.items() if not v]:
+                    del _rate_store[k]
+                _rate_store_auth.update({k: [t for t in v if now - t < RATE_LIMIT_AUTH_WINDOW] for k, v in _rate_store_auth.items()})
+                for k in [k for k, v in _rate_store_auth.items() if not v]:
+                    del _rate_store_auth[k]
+                for k in [k for k, v in _rate_cooldown.items() if now > v]:
+                    del _rate_cooldown[k]
+                _rate_last_cleanup = now
+
             # Tiered rate limiting:
             # - Public endpoints (register, guest/start, etc.): 5/min + 30-min cooldown
             # - Authenticated endpoints (update, logs, heartbeat): 60/5min, no cooldown
@@ -513,6 +530,15 @@ def _get_installer_token(token: str):
     return row
 
 
+def _consume_installer_token(token: str):
+    """Delete an installer token after successful claim (single-use enforcement)."""
+    db = sqlite3.connect(INSTALLER_DB)
+    db.execute("DELETE FROM installer_tokens WHERE token = ?", (token,))
+    db.commit()
+    db.close()
+    logger.info(f"Installer token consumed: ...{token[-8:]}")
+
+
 class InstallerGenerateRequest(BaseModel):
     company: str
 
@@ -635,6 +661,9 @@ async def installer_claim(request: Request, token: str, hostname: str):
             client, admin_headers, hostname, user_id
         )
 
+    # Invalidate token after successful claim (single-use)
+    _consume_installer_token(token)
+
     logger.info(f"Installer claim complete: {user_id}")
     return {
         "user_id": user_id,
@@ -740,6 +769,13 @@ async def _track_auth_failure(ip: str):
     """Track auth failures per IP. Opens a SuperOps ticket if threshold is crossed."""
     now = time.monotonic()
     async with _rate_lock:
+        # Periodic cleanup of stale auth failure entries
+        if len(_auth_fail_store) > AUTH_FAIL_MAX_IPS:
+            for k in [k for k, v in _auth_fail_store.items() if not v or now - v[-1] > AUTH_FAIL_WINDOW]:
+                del _auth_fail_store[k]
+            for k in [k for k, v in _auth_fail_alerted.items() if now - v > 3600]:
+                del _auth_fail_alerted[k]
+
         _auth_fail_store[ip] = [t for t in _auth_fail_store[ip] if now - t < AUTH_FAIL_WINDOW]
         _auth_fail_store[ip].append(now)
         count = len(_auth_fail_store[ip])
@@ -1166,6 +1202,8 @@ async def logs_upload(request: Request):
 HOLIDAY_CONFIG_PATH = "/opt/bracer-register/holiday.json"
 ADMIN_SESSION_STORE: dict = {}  # session_id -> { user_id, access_token, expires }
 ADMIN_SESSION_TTL = 8 * 3600  # 8 hours
+ADMIN_SESSION_MAX = 100  # max concurrent sessions before forced cleanup
+_admin_session_last_cleanup = 0.0
 
 
 def _load_holiday_config() -> dict:
@@ -1183,11 +1221,22 @@ def _save_holiday_config(config: dict):
 
 async def _validate_admin_session(request: Request) -> str:
     """Validate admin session cookie. Returns user_id or raises 401."""
+    # Periodic cleanup of expired admin sessions
+    global _admin_session_last_cleanup
+    now = time.time()
+    if len(ADMIN_SESSION_STORE) > ADMIN_SESSION_MAX or now - _admin_session_last_cleanup > 3600:
+        expired = [sid for sid, s in ADMIN_SESSION_STORE.items() if now > s["expires"]]
+        for sid in expired:
+            del ADMIN_SESSION_STORE[sid]
+        if expired:
+            logger.info(f"Admin session cleanup: removed {len(expired)} expired sessions")
+        _admin_session_last_cleanup = now
+
     session_id = request.cookies.get("bcw_admin")
     if not session_id or session_id not in ADMIN_SESSION_STORE:
         raise HTTPException(status_code=401, detail="Not authenticated")
     session = ADMIN_SESSION_STORE[session_id]
-    if time.time() > session["expires"]:
+    if now > session["expires"]:
         del ADMIN_SESSION_STORE[session_id]
         raise HTTPException(status_code=401, detail="Session expired")
     return session["user_id"]
@@ -1427,6 +1476,23 @@ async def admin_broadcast(request: Request):
     if len(message) > 2000:
         raise HTTPException(status_code=400, detail="Message too long (max 2000 chars)")
 
+    # Validate target: must be "all" or a known company broadcast room
+    if target != "all":
+        # Verify the room exists and is a company room by checking its alias
+        async with httpx.AsyncClient(timeout=10.0) as check_client:
+            resp = await check_client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{target}",
+                headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Broadcast target validation failed: room {target} not found (by {user_id})")
+                raise HTTPException(status_code=400, detail="Invalid target room")
+            room_data = resp.json()
+            alias = room_data.get("canonical_alias") or ""
+            if not alias.startswith(f"#company-") or not alias.endswith(f":{SERVER_NAME}"):
+                logger.warning(f"Broadcast target rejected: {target} alias={alias} (by {user_id})")
+                raise HTTPException(status_code=403, detail="Target is not a company broadcast room")
+
     rooms_sent = []
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1443,7 +1509,7 @@ async def admin_broadcast(request: Request):
                 logger.error(f"Broadcast to all failed: {resp.status_code} {resp.text[:200]}")
                 raise HTTPException(status_code=500, detail="Failed to send broadcast")
         else:
-            # Send to specific company room
+            # Send to validated company room
             room_id = target
             resp = await client.put(
                 f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{secrets.token_hex(8)}",

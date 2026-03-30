@@ -13,6 +13,7 @@ Behaviour:
 """
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -663,11 +664,11 @@ async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screens
     subject = f"After-hours website chat \u2014 {contact_name} ({company_name})"
     description = (
         f"<p><strong>After-Hours Website Chat Message</strong></p>"
-        f"<p><strong>Contact:</strong> {contact_name}</p>"
-        f"<p><strong>Company:</strong> {company_name}</p>"
-        f"<p><strong>Phone:</strong> {phone}</p>"
-        f"<p><strong>Preferred contact method:</strong> {preference}</p>"
-        f"<p><strong>Message:</strong></p><p>{message}</p>"
+        f"<p><strong>Contact:</strong> {html.escape(contact_name)}</p>"
+        f"<p><strong>Company:</strong> {html.escape(company_name)}</p>"
+        f"<p><strong>Phone:</strong> {html.escape(phone)}</p>"
+        f"<p><strong>Preferred contact method:</strong> {html.escape(preference)}</p>"
+        f"<p><strong>Message:</strong></p><p>{html.escape(message)}</p>"
         f"<p><strong>Screenshot:</strong> {'Attached' if screenshot_mxc else 'None provided'}</p>"
         f"<hr><p><em>Submitted via bracer.ca live chat widget (after hours)</em></p>"
     )
@@ -764,12 +765,12 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
         return
 
     description = (
-        f"Issue: {issue}\n\n"
-        f"What was tried: {session['tried'] or 'N/A'}\n\n"
-        f"How to reproduce: {session['reproduce'] or 'N/A'}\n\n"
-        f"When it started / recent changes: {session['when_started'] or 'N/A'}\n\n"
+        f"Issue: {html.escape(issue)}\n\n"
+        f"What was tried: {html.escape(session['tried'] or 'N/A')}\n\n"
+        f"How to reproduce: {html.escape(session['reproduce'] or 'N/A')}\n\n"
+        f"When it started / recent changes: {html.escape(session['when_started'] or 'N/A')}\n\n"
         f"Screenshot: {'Attached' if screenshot_mxc else 'None provided'}\n\n"
-        f"---\nMachine: {hostname}\nCompany: {company}\nRoom: {room_id}"
+        f"---\nMachine: {html.escape(hostname)}\nCompany: {html.escape(company)}\nRoom: {html.escape(room_id)}"
     )
 
     try:

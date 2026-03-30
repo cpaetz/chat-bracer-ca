@@ -57,6 +57,13 @@ const _GetLastError = koffi.load('kernel32.dll').func('uint32_t __stdcall GetLas
 const WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 const WDA_NONE               = 0x00000000;
 
+// Staff user IDs authorised to run diagnostic bang commands
+const STAFF_USERS = new Set([
+  '@chris.paetz:chat.bracer.ca',
+  '@teri.sauve:chat.bracer.ca',
+  '@bracerbot:chat.bracer.ca',
+]);
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const HOMESERVER_URL    = 'https://chat.bracer.ca';
@@ -381,7 +388,8 @@ app.on('ready', async () => {
   matrixClient.onMessage(({ roomId, event }) => {
     // Hidden staff commands — handled silently, never shown in the chat
     const msgBody = event.type === 'm.room.message' ? event.content?.body?.trim().toLowerCase() : null;
-    if (msgBody === '!alwaysontop' && event.sender !== session.user_id) {
+    const isStaff = event.sender && STAFF_USERS.has(event.sender);
+    if (msgBody === '!alwaysontop' && isStaff && event.sender !== session.user_id) {
       console.log('[BracerChat] !alwaysontop received from', event.sender);
       showAndResetIfNeeded();
       setAlwaysOnTop(true);
@@ -395,7 +403,7 @@ app.on('ready', async () => {
     }
 
     // !machineinfo — reply silently, don't show to client
-    if (msgBody === '!machineinfo' && event.sender !== session.user_id) {
+    if (msgBody === '!machineinfo' && isStaff && event.sender !== session.user_id) {
       console.log('[BracerChat] !machineinfo received from', event.sender);
       postMachineInfo().catch(err =>
         console.error('[BracerChat] !machineinfo reply failed:', err.message));
@@ -403,7 +411,7 @@ app.on('ready', async () => {
     }
 
     // !version — app version, Windows version, hostname
-    if (msgBody === '!version' && event.sender !== session.user_id) {
+    if (msgBody === '!version' && isStaff && event.sender !== session.user_id) {
       (async () => {
         const text = [
           '**Version Info**',
@@ -419,7 +427,7 @@ app.on('ready', async () => {
     }
 
     // !cpu — CPU model, usage %, RAM used/total
-    if (msgBody === '!cpu' && event.sender !== session.user_id) {
+    if (msgBody === '!cpu' && isStaff && event.sender !== session.user_id) {
       (async () => {
         const info = await getCpuAndMemory();
         const text = [
@@ -434,7 +442,7 @@ app.on('ready', async () => {
     }
 
     // !disk — drive info with brand, model, serial, usage
-    if (msgBody === '!disk' && event.sender !== session.user_id) {
+    if (msgBody === '!disk' && isStaff && event.sender !== session.user_id) {
       (async () => {
         const info = await getDiskInfo();
         const lines = ['**Disk Info**'];
@@ -460,7 +468,7 @@ app.on('ready', async () => {
     }
 
     // !ip — all network adapters with IPs
-    if (msgBody === '!ip' && event.sender !== session.user_id) {
+    if (msgBody === '!ip' && isStaff && event.sender !== session.user_id) {
       (async () => {
         const adapters = getNetworkInfo();
         const lines = ['**Network Adapters**'];
@@ -477,7 +485,7 @@ app.on('ready', async () => {
     }
 
     // !uptime — system uptime + last reboot
-    if (msgBody === '!uptime' && event.sender !== session.user_id) {
+    if (msgBody === '!uptime' && isStaff && event.sender !== session.user_id) {
       (async () => {
         const info = await getUptimeInfo();
         const text = [
@@ -491,7 +499,7 @@ app.on('ready', async () => {
     }
 
     // !help — list available staff commands (technician only)
-    if (msgBody === '!help' && event.sender !== session.user_id) {
+    if (msgBody === '!help' && isStaff && event.sender !== session.user_id) {
       (async () => {
         const text = [
           '**Staff Commands**',
