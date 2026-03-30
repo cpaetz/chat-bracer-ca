@@ -35,7 +35,7 @@ const path = require('path');
 const fs   = require('fs');
 const os   = require('os');
 
-const { readSession }                    = require('./credentials');
+const { readSession, writeSession }       = require('./credentials');
 const { getMachineInfo, getWindowsUser, getWindowsUserAsync, getCpuAndMemory, getDiskInfo, getNetworkInfo, getUptimeInfo } = require('./machine-info');
 const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray, setTrayBadge, clearTrayBadge } = require('./tray');
@@ -266,15 +266,41 @@ app.on('ready', async () => {
 
   // 1. Load credentials ──────────────────────────────────────────────────
   session = readSession();
-  if (!session || !session.access_token) {
-    console.error('[BracerChat] session.dat missing or invalid. Run the deployment script first.');
-    app.quit();
-    return;
-  }
 
-  // 2. Machine info ──────────────────────────────────────────────────────
+  // 2. Machine info (needed for reauth if session decrypt fails) ────────
   machineInfo  = getMachineInfo();
   currentUser  = machineInfo.windowsUser;
+
+  // If DPAPI decrypt failed (e.g., different user logged in), try server reauth
+  if (!session || !session.access_token) {
+    console.warn('[BracerChat] session.dat unreadable — attempting server reauth...');
+    try {
+      const reauthResp = await new Promise((resolve, reject) => {
+        const postData = JSON.stringify({ hostname: machineInfo.hostname, serial: machineInfo.serial });
+        const opts = new URL('https://chat.bracer.ca/api/machine/reauth');
+        const req = require('https').request({
+          hostname: opts.hostname, path: opts.pathname, method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(data)) : reject(new Error(`HTTP ${res.statusCode}: ${data}`)));
+        });
+        req.on('error', reject);
+        req.setTimeout(15_000, () => { req.destroy(); reject(new Error('Reauth timeout')); });
+        req.write(postData);
+        req.end();
+      });
+      session = reauthResp;
+      writeSession(session);
+      console.log('[BracerChat] Reauth successful — new credentials saved with CurrentUser DPAPI');
+    } catch (err) {
+      console.error('[BracerChat] Reauth failed:', err.message);
+      console.error('[BracerChat] session.dat missing and reauth failed. Run the deployment script.');
+      app.quit();
+      return;
+    }
+  }
 
   // 3. Startup cleanup ───────────────────────────────────────────────────
   cleanupExpired();

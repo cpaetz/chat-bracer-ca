@@ -66,7 +66,7 @@ _rate_last_cleanup = 0.0  # monotonic timestamp of last cleanup
 RATE_CLEANUP_INTERVAL = 300  # cleanup stale entries every 5 min
 
 # Endpoints that are public-facing and need tight rate limits
-_PUBLIC_RATE_PATHS = {"/api/register", "/api/companies", "/api/installer/claim", "/api/guest/start"}
+_PUBLIC_RATE_PATHS = {"/api/register", "/api/companies", "/api/installer/claim", "/api/guest/start", "/api/machine/reauth"}
 # Endpoints that are authenticated and can have higher limits
 _AUTH_RATE_PREFIXES = ("/api/update/", "/api/logs/", "/api/guest/heartbeat")
 
@@ -921,6 +921,120 @@ async def update_check(request: Request):
     except FileNotFoundError:
         update_type = "installer"  # safe fallback
     return {"version": version, "update_type": update_type}
+
+
+class ReauthRequest(BaseModel):
+    hostname: str
+    serial: str
+
+    @validator("hostname")
+    def validate_hostname(cls, v):
+        if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", v):
+            raise ValueError("Invalid hostname")
+        return v.lower()
+
+    @validator("serial")
+    def validate_serial(cls, v):
+        v = v.strip()
+        if not (1 <= len(v) <= 128):
+            raise ValueError("Serial must be 1-128 characters")
+        # Only allow alphanumeric, dash, dot, underscore, space
+        if not re.match(r"^[a-zA-Z0-9\-._\s]+$", v):
+            raise ValueError("Invalid serial characters")
+        return v
+
+
+@app.post("/api/machine/reauth")
+async def machine_reauth(body: ReauthRequest, request: Request):
+    """Re-authenticate a machine that lost its DPAPI credentials (user change).
+    Verifies the Matrix user exists and the serial matches the display name,
+    then resets the password and returns fresh credentials.
+    Rate limited: uses public rate limit (5/min + cooldown)."""
+    hostname = body.hostname
+    serial = body.serial
+    user_id = f"@{hostname}:{SERVER_NAME}"
+
+    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} ip={request.client.host}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+
+        # Verify the Matrix user exists
+        resp = await client.get(
+            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
+            headers=admin_headers,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"Reauth failed: user {user_id} not found")
+            raise HTTPException(status_code=404, detail="Machine not registered")
+
+        # Verify this is a machine account (no dots in localpart, not staff/bot)
+        localpart = hostname
+        if "." in localpart or localpart in ("bracerbot", "bracer-register"):
+            raise HTTPException(status_code=403, detail="Not a machine account")
+
+        # Reset password and log in
+        new_password = generate_password()
+        resp = await client.put(
+            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
+            headers=admin_headers,
+            json={"password": new_password},
+        )
+        if resp.status_code not in (200, 201):
+            raise HTTPException(status_code=500, detail="Password reset failed")
+
+        resp = await client.post(
+            f"{SYNAPSE_URL}/_matrix/client/v3/login",
+            json={
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": hostname},
+                "password": new_password,
+                "device_id": "BRACER_CHAT",
+            },
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=500, detail="Login failed")
+
+        login_data = resp.json()
+        access_token = login_data["access_token"]
+        device_id = login_data["device_id"]
+
+        # Look up the machine's rooms
+        resp = await client.get(
+            f"{SYNAPSE_URL}/_synapse/admin/v1/users/{user_id}/joined_rooms",
+            headers=admin_headers,
+        )
+        room_ids = resp.json().get("joined_rooms", []) if resp.status_code == 200 else []
+
+        machine_room = None
+        broadcast_room = BROADCAST_ROOM_ID
+        company_room = None
+
+        for room_id in room_ids:
+            resp2 = await client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{room_id}",
+                headers=admin_headers,
+            )
+            if resp2.status_code == 200:
+                alias = resp2.json().get("canonical_alias") or ""
+                if alias == f"#{hostname}:{SERVER_NAME}":
+                    machine_room = room_id
+                elif alias.startswith("#company-"):
+                    company_room = room_id
+
+    if not machine_room:
+        logger.warning(f"Reauth: could not find machine room for {hostname}")
+
+    logger.info(f"Reauth complete: {user_id} ip={request.client.host}")
+    return {
+        "user_id": user_id,
+        "access_token": access_token,
+        "device_id": device_id,
+        "elevated": False,
+        "room_id_machine": machine_room or "",
+        "room_id_broadcast": broadcast_room,
+        "room_id_company": company_room or "",
+    }
 
 
 @app.get("/api/update/asar")

@@ -67,7 +67,7 @@ function ps(expression, fallback = 'Unknown') {
  * interactive session, correct even when the app runs as SYSTEM.
  */
 function getWindowsUser() {
-  const raw = ps('(Get-WmiObject -Class Win32_ComputerSystem).UserName');
+  const raw = ps('(Get-CimInstance -Class Win32_ComputerSystem).UserName');
   return raw.includes('\\') ? raw.split('\\').pop() : raw;
 }
 
@@ -83,17 +83,12 @@ function getMachineInfo() {
   let windowsUser = 'Unknown';
   let serial      = 'Unknown';
   try {
-    const script = [
-      "$ProgressPreference = 'SilentlyContinue'",
-      "$u = (Get-WmiObject -Class Win32_ComputerSystem).UserName",
-      "$s = (Get-WmiObject -Class Win32_BIOS).SerialNumber",
+    const out = runPsScript([
+      "$u = (Get-CimInstance -Class Win32_ComputerSystem).UserName",
+      "$s = (Get-CimInstance -Class Win32_BIOS).SerialNumber",
       "Write-Output $u",
-      "Write-Output $s"
-    ].join('; ');
-
-    const out   = execFileSync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', script
-    ], { encoding: 'utf8', timeout: 10_000 });
+      "Write-Output $s",
+    ], { timeout: 10_000 });
 
     const lines = out.trim().split(/\r?\n/);
     const rawUser = (lines[0] || '').trim();

@@ -41,7 +41,8 @@ try {
     }
     $sessionJson = $sessionObj | ConvertTo-Json -Compress
 
-    # 3. DPAPI encrypt (LocalMachine scope)
+    # 3. DPAPI encrypt (LocalMachine scope — the app will migrate to CurrentUser on first launch)
+    # Installer runs as SYSTEM, so CurrentUser here would be SYSTEM's profile, not the user's.
     $bytes     = [System.Text.Encoding]::UTF8.GetBytes($sessionJson)
     $encrypted = [System.Security.Cryptography.ProtectedData]::Protect(
         $bytes, $null,
