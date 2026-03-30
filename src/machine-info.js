@@ -12,6 +12,41 @@ const { promisify }              = require('util');
 const os                         = require('os');
 
 const execFileAsync = promisify(execFile);
+const path = require('path');
+const fs   = require('fs');
+
+/**
+ * Write a PowerShell script to a temp file and execute it with -File.
+ * This avoids Node 22's DEP0190 which expands $_ and other $ variables
+ * in -Command arguments before they reach PowerShell.
+ */
+function runPsScript(scriptLines, opts = {}) {
+  const tmpFile = path.join(os.tmpdir(), `bracer-ps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`);
+  const content = '$ProgressPreference = "SilentlyContinue"\r\n' + scriptLines.join('\r\n');
+  fs.writeFileSync(tmpFile, content, 'utf8');
+  try {
+    const out = execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', tmpFile
+    ], { encoding: 'utf8', timeout: opts.timeout || 8_000 });
+    return out;
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
+
+async function runPsScriptAsync(scriptLines, opts = {}) {
+  const tmpFile = path.join(os.tmpdir(), `bracer-ps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`);
+  const content = '$ProgressPreference = "SilentlyContinue"\r\n' + scriptLines.join('\r\n');
+  fs.writeFileSync(tmpFile, content, 'utf8');
+  try {
+    const result = await execFileAsync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', tmpFile
+    ], { encoding: 'utf8', timeout: opts.timeout || 15_000 });
+    return result;
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
 
 /**
  * Runs a PowerShell expression, returning trimmed stdout or a fallback.
@@ -19,10 +54,7 @@ const execFileAsync = promisify(execFile);
  */
 function ps(expression, fallback = 'Unknown') {
   try {
-    const script = `$ProgressPreference = 'SilentlyContinue'; ${expression}`;
-    const out = execFileSync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', script
-    ], { encoding: 'utf8', timeout: 8_000 });
+    const out = runPsScript([expression]);
     return out.trim() || fallback;
   } catch {
     return fallback;
@@ -105,11 +137,10 @@ function _getIPAndMAC() {
  * Called by the 60-second display-name poll in main.js.
  */
 async function getWindowsUserAsync() {
-  const script = "$ProgressPreference = 'SilentlyContinue'; (Get-WmiObject -Class Win32_ComputerSystem).UserName";
   try {
-    const { stdout } = await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', script
-    ], { encoding: 'utf8', timeout: 8_000 });
+    const { stdout } = await runPsScriptAsync([
+      "(Get-CimInstance -Class Win32_ComputerSystem).UserName",
+    ], { timeout: 8_000 });
     const raw = stdout.trim();
     return raw.includes('\\') ? raw.split('\\').pop() : (raw || 'Unknown');
   } catch {
@@ -122,23 +153,18 @@ async function getWindowsUserAsync() {
  */
 async function getCpuAndMemory() {
   try {
-    const script = [
-      "$ProgressPreference = 'SilentlyContinue'",
-      "$cpu = (Get-WmiObject Win32_Processor | Select-Object -First 1)",
-      "$cpuLoad = (Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average",
-      "$mem = Get-WmiObject Win32_OperatingSystem",
+    const { stdout } = await runPsScriptAsync([
+      "$cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1)",
+      "$cpuLoad = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average",
+      "$mem = Get-CimInstance Win32_OperatingSystem",
       "$totalGB = [math]::Round($mem.TotalVisibleMemorySize / 1MB, 1)",
       "$freeGB = [math]::Round($mem.FreePhysicalMemory / 1MB, 1)",
       "$usedGB = [math]::Round($totalGB - $freeGB, 1)",
       "$pct = [math]::Round(($usedGB / $totalGB) * 100, 0)",
       "Write-Output $cpu.Name",
-      "Write-Output \"$cpuLoad\"",
-      "Write-Output \"$usedGB / $totalGB GB ($pct%)\"",
-    ].join('; ');
-
-    const { stdout } = await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', script
-    ], { encoding: 'utf8', timeout: 15_000 });
+      "Write-Output \"${cpuLoad}\"",
+      "Write-Output \"${usedGB} / ${totalGB} GB (${pct}%)\"",
+    ]);
 
     const lines = stdout.trim().split(/\r?\n/);
     return {
@@ -156,29 +182,24 @@ async function getCpuAndMemory() {
  */
 async function getDiskInfo() {
   try {
-    const script = [
-      "$ProgressPreference = 'SilentlyContinue'",
+    const { stdout } = await runPsScriptAsync([
       "# Physical disk info",
-      "$disks = Get-WmiObject Win32_DiskDrive | ForEach-Object {",
-      "  $_.DeviceID + '|' + $_.Model + '|' + $_.SerialNumber.Trim() + '|' + [math]::Round($_.Size / 1GB, 0)",
+      "$disks = Get-PhysicalDisk | ForEach-Object {",
+      "  $_.DeviceId + '|' + $_.FriendlyName + '|' + $_.SerialNumber.Trim() + '|' + [math]::Round($_.Size / 1GB, 0)",
       "}",
       "# Logical volumes",
-      "$vols = Get-WmiObject Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {",
+      "$vols = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {",
       "  $totalGB = [math]::Round($_.Size / 1GB, 1)",
       "  $freeGB = [math]::Round($_.FreeSpace / 1GB, 1)",
       "  $usedGB = [math]::Round($totalGB - $freeGB, 1)",
       "  $pct = if ($totalGB -gt 0) { [math]::Round(($usedGB / $totalGB) * 100, 0) } else { 0 }",
-      "  $_.DeviceID + '|' + $_.VolumeName + '|' + \"$usedGB/$totalGB GB ($pct%)\"",
+      "  $_.DeviceID + '|' + $_.VolumeName + '|' + \"${usedGB}/${totalGB} GB (${pct}%)\"",
       "}",
       "Write-Output 'DISKS'",
       "$disks | ForEach-Object { Write-Output $_ }",
       "Write-Output 'VOLUMES'",
       "$vols | ForEach-Object { Write-Output $_ }",
-    ].join('; ');
-
-    const { stdout } = await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', script
-    ], { encoding: 'utf8', timeout: 15_000 });
+    ]);
 
     const lines = stdout.trim().split(/\r?\n/);
     const disks = [];
@@ -198,7 +219,8 @@ async function getDiskInfo() {
     }
 
     return { disks, volumes };
-  } catch {
+  } catch (err) {
+    console.error('[machine-info] getDiskInfo failed:', err.message, err.stderr || '');
     return { disks: [], volumes: [] };
   }
 }
@@ -231,21 +253,16 @@ function getNetworkInfo() {
  */
 async function getUptimeInfo() {
   try {
-    const script = [
-      "$ProgressPreference = 'SilentlyContinue'",
-      "$os = Get-WmiObject Win32_OperatingSystem",
-      "$boot = $os.ConvertToDateTime($os.LastBootUpTime)",
+    const { stdout } = await runPsScriptAsync([
+      "$os = Get-CimInstance Win32_OperatingSystem",
+      "$boot = $os.LastBootUpTime",
       "$uptime = (Get-Date) - $boot",
       "$days = $uptime.Days",
       "$hrs = $uptime.Hours",
       "$mins = $uptime.Minutes",
       "Write-Output $boot.ToString('yyyy-MM-dd HH:mm:ss')",
       "Write-Output \"${days}d ${hrs}h ${mins}m\"",
-    ].join('; ');
-
-    const { stdout } = await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command', script
-    ], { encoding: 'utf8', timeout: 10_000 });
+    ], { timeout: 10_000 });
 
     const lines = stdout.trim().split(/\r?\n/);
     return {
