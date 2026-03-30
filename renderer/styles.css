@@ -22,6 +22,10 @@
   --color-warn-text     : #C62828;
   --color-warn-border   : #FFCDD2;
   --color-broadcast-text: #4a1a1a;
+  --color-broadcast-bg  : #FFF5F5;
+  --color-broadcast-border: #C62828;
+  --color-broadcast-label: #C62828;
+  --color-broadcast-time: #999;
 }
 
 /* ── Dark mode — auto-detected from system setting ───────────────────── */
@@ -42,6 +46,10 @@
     --color-warn-text     : #ff8a80;
     --color-warn-border   : #5c2a2a;
     --color-broadcast-text: #ffffff;
+    --color-broadcast-bg  : #2a1a1a;
+    --color-broadcast-border: #c62828;
+    --color-broadcast-label: #ff6b6b;
+    --color-broadcast-time: #999;
   }
 
   /* Dark mode overrides for elements that use hardcoded colors */
@@ -69,8 +77,7 @@
   #screen-picker { background: var(--color-surface); border-color: var(--color-border); }
   #screen-picker-cancel { color: var(--color-text-secondary); border-color: var(--color-border); }
   #screen-picker-cancel:hover { background: var(--color-bg); }
-  .broadcast-box { background: #2a1a1a; border-color: #c62828; }
-  .broadcast-label { color: #ff6b6b; }
+  /* broadcast colors handled via --color-broadcast-* variables in :root */
   mark.search-highlight { background: #5c4a00; }
   mark.search-highlight.active { background: #f8941b; color: #121212; }
   .reply-quote { background: rgba(255,255,255,0.04); }
@@ -847,17 +854,17 @@ mark.search-highlight.active {
 .broadcast-label {
   font-size  : 11px;
   font-weight: 700;
-  color      : #C62828;
+  color      : var(--color-broadcast-label);
   letter-spacing: 0.3px;
   margin-bottom : 4px;
   padding-left  : 2px;
 }
 
 .broadcast-box {
-  border       : 2px solid #C62828;
+  border       : 2px solid var(--color-broadcast-border);
   border-radius: 8px;
   padding      : 10px 14px;
-  background   : #FFF5F5;
+  background   : var(--color-broadcast-bg);
   animation    : broadcast-flash 1.2s ease-in-out 5; /* flash 5 times, then stops */
 }
 
