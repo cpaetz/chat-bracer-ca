@@ -40,6 +40,8 @@ $AsarDest        = 'C:\Program Files\Bracer Chat\resources\app.asar'
 $AppExe          = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
 $InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-latest.exe'
 $MaxRetries      = 3
+$LockFile        = 'C:\ProgramData\BracerChat\update-lastrun.txt'
+$CooldownSeconds = 300  # 5 minutes
 $OpTempDir       = Join-Path $env:TEMP 'bracer-op'
 $OpExePath       = Join-Path $OpTempDir 'op.exe'
 $OpCliUrl        = 'https://cache.agilebits.com/dist/1P/op2/pkg/v2.33.0/op_windows_amd64_v2.33.0.zip'
@@ -55,11 +57,11 @@ function Log-Message {
         [string]$LogFile = $Global:DefaultLogFile
     )
     $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $FormattedMessage = "${Timestamp} - ${Level} - ${Message}"
+    $FormattedMessage = "$Timestamp - $Level - $Message"
     switch ($Level) {
         'INFO'    { Write-Host $FormattedMessage }
         'WARNING' { Write-Warning $FormattedMessage }
-        'ERROR'   { Write-Host "ERROR: ${FormattedMessage}" -ForegroundColor Red }
+        'ERROR'   { Write-Host "ERROR: $FormattedMessage" -ForegroundColor Red }
     }
     if (-not [string]::IsNullOrEmpty($LogFile)) {
         try { Out-File -FilePath $LogFile -InputObject $FormattedMessage -Append -ErrorAction Stop }
@@ -78,7 +80,7 @@ function Install-OpCli {
         Log-Message "Downloading 1Password CLI..."
         Invoke-WebRequest -Uri $OpCliUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
         # L3: Verify SHA256 hash of downloaded 1Password CLI binary
-        $ExpectedHash = 'B98A98098F49FCBBA75D0FF5E13D582688BA6E28BF7BB4FEFA11D3B226E5C893'
+        $ExpectedHash = '7834D9A381379E7D6A7F47A860F4782D22701A5FEF3E48414C72DA277DC8F501'
         $ActualHash   = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash
         if ($ActualHash -ne $ExpectedHash) {
             Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
@@ -140,7 +142,7 @@ function Remove-StaleTasks {
     # Task Scheduler to kill the app 2 minutes after every launch.
     $WatchdogName = 'Bracer Chat Watchdog'
     Unregister-ScheduledTask -TaskName $WatchdogName -Confirm:$false -ErrorAction SilentlyContinue
-    $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--watchdog'
+    $Action    = New-ScheduledTaskAction -Execute "`"$AppExe`"" -Argument '--watchdog'
     $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)
     $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
     $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
@@ -150,7 +152,7 @@ function Remove-StaleTasks {
     # Fix HKLM Run key to include --startup so the app starts hidden on boot.
     # Older installs wrote the key without this flag, causing the window to show on login.
     $RunKeyPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
-    $RunKeyValue = "`"${AppExe}`" --startup"
+    $RunKeyValue = "`"$AppExe`" --startup"
     Set-ItemProperty -Path $RunKeyPath -Name 'Bracer Chat' -Value $RunKeyValue -ErrorAction SilentlyContinue
     Log-Message "HKLM Run key updated with --startup flag."
 
@@ -164,13 +166,13 @@ function Remove-StaleTasks {
 # ---------------------------------------------------------------------------
 function Start-BracerChatAsUser {
     if (-not (Test-Path $AppExe)) {
-        Log-Message "App not found at ${AppExe} - skipping relaunch." -Level 'WARNING'
+        Log-Message "App not found at $AppExe - skipping relaunch." -Level 'WARNING'
         return
     }
     $TaskName = 'BracerChatAsarRelaunch'
     try {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        $Action    = New-ScheduledTaskAction -Execute "`"${AppExe}`"" -Argument '--startup'
+        $Action    = New-ScheduledTaskAction -Execute "`"$AppExe`"" -Argument '--startup'
         $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
         $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
         $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
@@ -191,11 +193,11 @@ function Invoke-FullInstall {
     )
 
     $TempExe = Join-Path $env:TEMP 'BracerChatSetup.exe'
-    Log-Message "App not installed. Falling back to full installer from ${InstallerUrl}..."
+    Log-Message "App not installed. Falling back to full installer from $InstallerUrl..."
     try {
         Invoke-WebRequest -Uri $InstallerUrl -Headers @{ Authorization = $AuthHeader } -OutFile $TempExe -UseBasicParsing -ErrorAction Stop
         $SizeMB = [math]::Round((Get-Item $TempExe).Length / 1MB, 1)
-        Log-Message "Downloaded installer (${SizeMB} MB). Running silent install..."
+        Log-Message "Downloaded installer ($SizeMB MB). Running silent install..."
         $Proc = Start-Process -FilePath $TempExe -ArgumentList '/S' -Wait -PassThru -NoNewWindow -ErrorAction Stop
         Remove-Item $TempExe -Force -ErrorAction SilentlyContinue
         if ($Proc.ExitCode -ne 0) {
@@ -250,29 +252,29 @@ function Download-VerifiedAsar {
     param([string]$AuthHeader, [string]$DestPath)
 
     for ($Attempt = 1; $Attempt -le $MaxRetries; $Attempt++) {
-        Log-Message "Download attempt ${Attempt}/${MaxRetries}..."
+        Log-Message "Download attempt $Attempt/$MaxRetries..."
 
         # Download the SHA-256 hash file first
         try {
             $HashResponse = Invoke-WebRequest -Uri $HashUrl -Headers @{ Authorization = $AuthHeader } -UseBasicParsing -ErrorAction Stop
             $ExpectedHash = $HashResponse.Content.Trim().ToUpper()
-            Log-Message "Expected SHA-256: ${ExpectedHash}"
+            Log-Message "Expected SHA-256: $ExpectedHash"
         } catch {
             Log-Message "Hash file download failed: $($_.Exception.Message)" -Level 'WARNING'
             if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds 5; continue }
-            throw "Failed to download SHA-256 hash after ${MaxRetries} attempts."
+            throw "Failed to download SHA-256 hash after $MaxRetries attempts."
         }
 
         # Download the asar
         try {
             Invoke-WebRequest -Uri $AsarUrl -Headers @{ Authorization = $AuthHeader } -OutFile $DestPath -UseBasicParsing -ErrorAction Stop
             $SizeMB = [math]::Round((Get-Item $DestPath).Length / 1MB, 1)
-            Log-Message "Downloaded ${SizeMB} MB."
+            Log-Message "Downloaded $SizeMB MB."
         } catch {
             Remove-Item $DestPath -Force -ErrorAction SilentlyContinue
             Log-Message "ASAR download failed: $($_.Exception.Message)" -Level 'WARNING'
             if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds 5; continue }
-            throw "Failed to download ASAR after ${MaxRetries} attempts."
+            throw "Failed to download ASAR after $MaxRetries attempts."
         }
 
         # Verify SHA-256
@@ -282,12 +284,12 @@ function Download-VerifiedAsar {
             return
         }
 
-        Log-Message "SHA-256 MISMATCH! Expected ${ExpectedHash}, got ${ActualHash}" -Level 'WARNING'
+        Log-Message "SHA-256 MISMATCH! Expected $ExpectedHash, got $ActualHash" -Level 'WARNING'
         Remove-Item $DestPath -Force -ErrorAction SilentlyContinue
         if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds 5 }
     }
 
-    throw "ASAR SHA-256 verification failed after ${MaxRetries} attempts. Update aborted."
+    throw "ASAR SHA-256 verification failed after $MaxRetries attempts. Update aborted."
 }
 
 function Invoke-AsarUpdate {
@@ -309,10 +311,10 @@ function Invoke-AsarUpdate {
     $InstalledVersion = Get-InstalledVersion
     $ServerVersion    = Get-ServerVersion -AuthHeader $AuthHeader
     if ($null -ne $ServerVersion -and $InstalledVersion -eq $ServerVersion) {
-        Log-Message "Already at v${InstalledVersion} — no update needed. Exiting."
+        Log-Message "Already at v$InstalledVersion — no update needed. Exiting."
         return
     }
-    Log-Message "Version check: installed v${InstalledVersion}, server v${ServerVersion}. Updating..."
+    Log-Message "Version check: installed v$InstalledVersion, server v$ServerVersion. Updating..."
 
     # Download and verify the asar (retries up to $MaxRetries on hash mismatch)
     $TempAsar = Join-Path $env:TEMP 'BracerChatUpdate.asar'
@@ -327,7 +329,7 @@ function Invoke-AsarUpdate {
     }
 
     # Replace asar with retry loop (file may still be releasing)
-    Log-Message "Replacing ${AsarDest}..."
+    Log-Message "Replacing $AsarDest..."
     $Replaced = $false
     for ($i = 0; $i -lt 10; $i++) {
         try {
@@ -346,7 +348,7 @@ function Invoke-AsarUpdate {
         throw "Failed to replace app.asar after 10 attempts."
     }
 
-    Log-Message "app.asar replaced successfully (v${InstalledVersion} -> v${ServerVersion})."
+    Log-Message "app.asar replaced successfully (v$InstalledVersion -> v$ServerVersion)."
 
     # Grant BUILTIN\Users modify rights on ProgramData\BracerChat so the app
     # can write window-prefs.json, update logs, etc. without elevation.
@@ -379,7 +381,7 @@ function Invoke-AsarUpdate {
 if ($null -eq $Global:DefaultLogFile) {
     $LogDir = 'C:\BracerTools\Logs'
     if (-not (Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }
-    $Global:DefaultLogFile = "${LogDir}\BracerChatUpdateAsar_$(Get-Date -Format 'yyyyMMddHHmmss').log"
+    $Global:DefaultLogFile = "$LogDir\BracerChatUpdateAsar_$(Get-Date -Format 'yyyyMMddHHmmss').log"
 }
 
 Log-Message "=== Bracer Chat Update Script started (ASAR with full-install fallback) ==="
@@ -389,8 +391,6 @@ Log-Message "=== Bracer Chat Update Script started (ASAR with full-install fallb
 # SuperOps queues scripts while assets are offline and fires them all at once
 # on reconnect, which can cause 10+ simultaneous copies of this script.
 # ---------------------------------------------------------------------------
-$LockFile = 'C:\ProgramData\BracerChat\update-lastrun.txt'
-$CooldownSeconds = 300  # 5 minutes
 if ($OverrideCooldown -eq 1) {
     Log-Message "Cooldown override enabled — skipping duplicate execution check."
 } elseif (Test-Path $LockFile) {
@@ -398,7 +398,7 @@ if ($OverrideCooldown -eq 1) {
         $LastRun = [datetime]::Parse((Get-Content $LockFile -Raw).Trim())
         $Elapsed = ((Get-Date) - $LastRun).TotalSeconds
         if ($Elapsed -lt $CooldownSeconds) {
-            Log-Message "Another instance ran $([math]::Round($Elapsed))s ago (cooldown ${CooldownSeconds}s). Exiting."
+            Log-Message "Another instance ran $([math]::Round($Elapsed))s ago (cooldown $CooldownSecondss). Exiting."
             exit 0
         }
     } catch {
@@ -419,7 +419,7 @@ try {
     Install-OpCli
     Log-Message "Reading credentials from 1Password..."
     $InstallAuth   = Read-OpSecret 'op://chat-bracer-ca/bracer-install Basic Auth/password'
-    $AuthHeader    = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("bracer-install:${InstallAuth}"))
+    $AuthHeader    = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("bracer-install:$InstallAuth"))
     Log-Message "Credentials loaded."
 
     Invoke-AsarUpdate -AuthHeader $AuthHeader
