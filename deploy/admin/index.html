@@ -57,6 +57,32 @@
   .stat-card .value { font-size: 32px; font-weight: 700; color: #2099c6; margin: 4px 0; }
   .stat-card .sub { font-size: 13px; color: #666; }
 
+  .unreplied-panel {
+    background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  .unreplied-panel h2 {
+    font-size: 16px; font-weight: 700; color: #333; margin-bottom: 16px;
+    padding-bottom: 8px; border-bottom: 1px solid #f0f0f0;
+  }
+  .unreplied-row {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid #f5f5f5;
+  }
+  .unreplied-row:last-child { border-bottom: none; }
+  .unreplied-row-info { flex: 1; min-width: 0; }
+  .unreplied-row-info .machine { font-weight: 700; font-size: 14px; color: #222; }
+  .unreplied-row-info .company { font-size: 12px; color: #888; margin-bottom: 4px; }
+  .unreplied-row-info .message { font-size: 13px; color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 500px; }
+  .unreplied-row-info .meta { font-size: 11px; color: #aaa; margin-top: 2px; }
+  .unreplied-dismiss {
+    flex-shrink: 0; background: none; border: 1px solid #e0e0e0; border-radius: 6px;
+    padding: 5px 12px; font-size: 12px; color: #666; cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+  }
+  .unreplied-dismiss:hover { background: #f5f5f5; color: #333; }
+  .unreplied-empty { color: #888; font-size: 14px; text-align: center; padding: 20px 0; }
+
   .section {
     background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 20px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
@@ -274,11 +300,21 @@
           <div class="value" id="stat-online" style="color:#22c55e;">0</div>
           <div class="sub">Click to filter online</div>
         </div>
+        <div class="stat-card" id="stat-unreplied-card" onclick="toggleUnrepliedPanel()">
+          <div class="label">Unreplied Chats</div>
+          <div class="value" id="stat-unreplied" style="color:#2099c6;">—</div>
+          <div class="sub">Click to view</div>
+        </div>
         <div class="stat-card" onclick="scrollToSection('company-section')">
           <div class="label">Companies</div>
           <div class="value" id="stat-companies">0</div>
           <div class="sub">Click to view</div>
         </div>
+      </div>
+
+      <div class="unreplied-panel" id="unreplied-panel" style="display:none;">
+        <h2>Unreplied Chats</h2>
+        <div id="unreplied-list"><div class="unreplied-empty">Loading...</div></div>
       </div>
 
       <div class="section">
@@ -476,6 +512,7 @@
     document.getElementById('conv-date').value = new Date().toISOString().slice(0, 10);
 
     renderCompanies(data);
+    pollUnreplied();
   }
 
   function renderCompanies(data) {
@@ -830,6 +867,89 @@
     }).catch(function() {
       toast('Copy failed — try selecting manually', 'error');
     });
+  };
+
+  // ---------------------------------------------------------------------------
+  // Unreplied chat counter
+  // ---------------------------------------------------------------------------
+
+  var unrepliedPanelOpen = false;
+  var unrepliedPollTimer = null;
+
+  function pollUnreplied() {
+    fetch('/api/admin/unreplied', { credentials: 'same-origin' })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(data) {
+        var count = data.unreplied_count || 0;
+        var el = document.getElementById('stat-unreplied');
+        el.textContent = count;
+        el.style.color = count > 0 ? '#e67e22' : '#22c55e';
+        if (unrepliedPanelOpen) {
+          renderUnrepliedPanel(data.unreplied_rooms || []);
+        }
+      })
+      .catch(function() {
+        // Silently fail — don't disrupt the dashboard
+      });
+  }
+
+  function renderUnrepliedPanel(rooms) {
+    var listEl = document.getElementById('unreplied-list');
+    if (rooms.length === 0) {
+      listEl.innerHTML = '<div class="unreplied-empty">No unreplied chats — all clear.</div>';
+      return;
+    }
+    listEl.innerHTML = '';
+    rooms.forEach(function(r) {
+      var timeAgo = formatTimeAgo(r.last_message_time);
+      var elementUrl = 'https://chat.bracer.ca/#/room/' + encodeURIComponent(r.room_id);
+      var row = document.createElement('div');
+      row.className = 'unreplied-row';
+      row.innerHTML =
+        '<div class="unreplied-row-info">' +
+          '<div class="machine"><a href="' + esc(elementUrl) + '" target="_blank" style="color:#2099c6;text-decoration:none;">' + esc(r.machine_hostname) + '</a></div>' +
+          '<div class="company">' + esc(r.company) + '</div>' +
+          '<div class="message">' + esc(r.last_message_body) + '</div>' +
+          '<div class="meta">' + esc(r.last_message_from) + ' &bull; ' + esc(timeAgo) + '</div>' +
+        '</div>' +
+        '<button class="unreplied-dismiss" onclick="dismissRoom(' +
+          JSON.stringify(r.room_id) + ',' + JSON.stringify(r.last_message_event_id) +
+        ')">No reply needed</button>';
+      listEl.appendChild(row);
+    });
+  }
+
+  function formatTimeAgo(isoStr) {
+    var diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+    if (diff < 60) return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+  }
+
+  window.dismissRoom = function(roomId, eventId) {
+    fetch('/api/admin/unreplied/dismiss', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room_id: roomId, event_id: eventId }),
+    })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function() { pollUnreplied(); })
+      .catch(function() { toast('Failed to dismiss', 'error'); });
+  };
+
+  window.toggleUnrepliedPanel = function() {
+    unrepliedPanelOpen = !unrepliedPanelOpen;
+    var panel = document.getElementById('unreplied-panel');
+    if (unrepliedPanelOpen) {
+      panel.style.display = 'block';
+      pollUnreplied();
+      unrepliedPollTimer = setInterval(pollUnreplied, 15000);
+    } else {
+      panel.style.display = 'none';
+      if (unrepliedPollTimer) { clearInterval(unrepliedPollTimer); unrepliedPollTimer = null; }
+    }
   };
 
   init();

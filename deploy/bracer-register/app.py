@@ -1803,3 +1803,184 @@ async def admin_messages(
 
     logger.info(f"admin_messages: room={room_id} from={from_ts} to={to_ts} count={len(messages)} truncated={truncated}")
     return {"messages": messages, "truncated": truncated}
+
+
+# ---------------------------------------------------------------------------
+# Unreplied chat counter
+# ---------------------------------------------------------------------------
+
+_DISMISS_STATE_FILE = "/opt/bracer-register/unreplied_dismiss.json"
+
+
+def _load_dismiss_state() -> dict:
+    try:
+        with open(_DISMISS_STATE_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_dismiss_state(state: dict) -> None:
+    try:
+        with open(_DISMISS_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        logger.error(f"Failed to save dismiss state: {e}")
+
+
+@app.get("/api/admin/unreplied")
+async def admin_unreplied(request: Request):
+    """Return count and list of machine rooms with unreplied client messages."""
+    await _validate_admin_session(request)
+
+    admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+    dismiss_state = _load_dismiss_state()
+    unreplied_rooms = []
+    display_name_cache: dict = {}
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Fetch all users (paginated)
+        users = []
+        from_token = "0"
+        while True:
+            resp = await client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v2/users?from={from_token}&limit=100&guests=false",
+                headers=admin_headers,
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            users.extend(data.get("users", []))
+            next_token = data.get("next_token")
+            if not next_token:
+                break
+            from_token = str(next_token)
+
+        for user in users:
+            uid = user.get("name", "")
+            localpart = uid.split(":")[0][1:] if ":" in uid else ""
+
+            # Skip staff, bot, guest, and registration accounts
+            if "." in localpart or localpart.startswith("guest-"):
+                continue
+            if localpart in ("bracerbot", "bracer-register"):
+                continue
+
+            machine_room = None
+            company_name = None
+
+            # Find machine room and company name via joined rooms
+            resp2 = await client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v1/users/{uid}/joined_rooms",
+                headers=admin_headers,
+            )
+            if resp2.status_code == 200:
+                for room_id in resp2.json().get("joined_rooms", []):
+                    resp3 = await client.get(
+                        f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{room_id}",
+                        headers=admin_headers,
+                    )
+                    if resp3.status_code == 200:
+                        rdata = resp3.json()
+                        alias = rdata.get("canonical_alias") or ""
+                        if alias.startswith("#company-") and company_name is None:
+                            rname = rdata.get("name", "")
+                            for sep in (" \u2014 ", " \u2013 ", " - "):
+                                if sep in rname:
+                                    company_name = rname.split(sep)[0].strip()
+                                    break
+                            if not company_name:
+                                company_name = rname.strip()
+                        elif alias == f"#{localpart}:{SERVER_NAME}":
+                            machine_room = room_id
+
+            if not machine_room:
+                continue
+
+            # Get recent messages from machine room to find last non-bot m.text event
+            resp4 = await client.get(
+                f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{urlquote(machine_room, safe='')}/messages?dir=b&limit=20",
+                headers=admin_headers,
+            )
+            if resp4.status_code != 200:
+                continue
+
+            last_event = None
+            for event in resp4.json().get("chunk", []):
+                if event.get("type") != "m.room.message":
+                    continue
+                if event.get("content", {}).get("msgtype") != "m.text":
+                    continue
+                if event.get("sender", "") == BOT_USER:
+                    continue
+                last_event = event
+                break
+
+            if not last_event:
+                # No non-bot m.text message found — nothing to reply to
+                continue
+
+            last_sender = last_event.get("sender", "")
+            if last_sender in STAFF_USERS:
+                # Last real message was from staff — already replied
+                continue
+
+            event_id = last_event.get("event_id", "")
+            # Check dismiss state: dismissed if event_id matches stored dismiss
+            dismissed = dismiss_state.get(machine_room, {})
+            if dismissed.get("event_id") == event_id:
+                continue
+
+            # Resolve display name (cached per sender)
+            if last_sender not in display_name_cache:
+                resp5 = await client.get(
+                    f"{SYNAPSE_URL}/_synapse/admin/v2/users/{urlquote(last_sender, safe='')}",
+                    headers=admin_headers,
+                )
+                if resp5.status_code == 200:
+                    display_name_cache[last_sender] = resp5.json().get("displayname") or last_sender
+                else:
+                    display_name_cache[last_sender] = last_sender
+
+            ts_ms = last_event.get("origin_server_ts", 0)
+            ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts_ms / 1000))
+
+            unreplied_rooms.append({
+                "room_id": machine_room,
+                "machine_hostname": localpart,
+                "company": company_name or "Unknown",
+                "last_message_from": display_name_cache[last_sender],
+                "last_message_sender_id": last_sender,
+                "last_message_body": last_event.get("content", {}).get("body", ""),
+                "last_message_time": ts_iso,
+                "last_message_event_id": event_id,
+            })
+
+    unreplied_rooms.sort(key=lambda r: r["last_message_time"])
+    logger.info(f"admin_unreplied: {len(unreplied_rooms)} unreplied rooms")
+    return {"unreplied_count": len(unreplied_rooms), "unreplied_rooms": unreplied_rooms}
+
+
+class DismissRequest(BaseModel):
+    room_id: str
+    event_id: str
+
+
+@app.post("/api/admin/unreplied/dismiss")
+async def admin_unreplied_dismiss(request: Request, body: DismissRequest):
+    """Mark a room's current unreplied message as dismissed."""
+    await _validate_admin_session(request)
+
+    if not body.room_id.startswith("!"):
+        raise HTTPException(status_code=400, detail="room_id must start with '!'")
+    if not body.event_id.startswith("$"):
+        raise HTTPException(status_code=400, detail="event_id must start with '$'")
+
+    state = _load_dismiss_state()
+    state[body.room_id] = {
+        "event_id": body.event_id,
+        "dismissed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _save_dismiss_state(state)
+    logger.info(f"admin_unreplied_dismiss: room={body.room_id} event={body.event_id}")
+    return {"ok": True}
