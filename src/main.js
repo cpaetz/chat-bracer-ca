@@ -41,7 +41,7 @@ const { MatrixClient }                   = require('./matrix-client');
 const { createTray, destroyTray, setTrayBadge, clearTrayBadge } = require('./tray');
 const { createWindow, showWindow, hideWindow, getWindow, sendToRenderer, flashWindow, setAlwaysOnTop } = require('./window');
 const { readCache, writeCache, cleanupExpired }               = require('./media-cache');
-const { checkAndUpdate, manualCheckForUpdate }                = require('./updater');
+const { getAppVersion }                                      = require('./updater');
 const { startLogUploader }                                    = require('./logUploader');
 
 // ── Win32 screen-capture exclusion (WDA_EXCLUDEFROMCAPTURE) ───────────────
@@ -422,11 +422,9 @@ app.on('ready', async () => {
           'A Bracer Systems Inc. product',
           '\u00A9 2026 Bracer Systems Inc.'
         ].join('\n'),
-        buttons  : ['Check for Updates', 'Close'],
-        defaultId: 1,
-        cancelId : 1
-      }).then(({ response }) => {
-        if (response === 0) manualCheckForUpdate(session.access_token);
+        buttons  : ['Close'],
+        defaultId: 0,
+        cancelId : 0
       });
     },
     (key, value) => {
@@ -617,17 +615,8 @@ app.on('ready', async () => {
   userPollInterval = setInterval(checkUserChange, 60_000);
 
   // 7. Self-update check ─────────────────────────────────────────────────
-  // First check: 30s base + 0–60min jitter so machines don't all hit the
-  // update server simultaneously after a fleet restart.
-  // Recurring check: every 4 hours so long-running machines get updates
-  // without needing a restart.
-  const UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
-  const updateJitterMs = 30_000 + Math.floor(Math.random() * 60 * 60 * 1000);
-  console.log(`[Main] Update check scheduled in ${Math.round(updateJitterMs / 60000)} min, then every 4 h`);
-  setTimeout(() => {
-    checkAndUpdate(session.access_token);
-    setInterval(() => checkAndUpdate(session.access_token), UPDATE_INTERVAL_MS);
-  }, updateJitterMs);
+  // Updates are pushed via SuperOps RMM — no in-app self-updater.
+  // The watchdog task (every 15 min) relaunches the app after a push update.
 
   // 8. Log uploader ──────────────────────────────────────────────────────
   // Uploads error log on startup (if changed) and every hour thereafter.

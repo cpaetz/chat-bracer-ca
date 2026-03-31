@@ -1,28 +1,31 @@
 <#
 .SYNOPSIS
-    Force-pushes the latest Bracer Chat app.asar to this machine immediately.
+    Pushes the latest Bracer Chat app.asar to this machine via SuperOps RMM.
 
 .DESCRIPTION
-    Downloads only the app.asar file (~22 MB) from the update server and replaces
-    it in-place in C:\Program Files\Bracer Chat\resources\.
-    Stops the running app, replaces the asar, then relaunches it in the
+    Checks if the installed version matches the server version. If already
+    up-to-date, exits immediately (safe to run on a schedule).
+
+    Downloads app.asar (~22 MB) and verifies its SHA-256 checksum against
+    the server-published hash. Retries up to 3 times on hash mismatch.
+    Stops the running app, replaces the asar, then relaunches in the
     logged-in user's interactive session via a one-shot scheduled task.
 
     If the app is not yet installed, falls back automatically to the full NSIS
     installer (~83 MB) so this script is safe to run on any machine regardless
     of state.
 
-    Use this script for emergency or manual rollouts when you don't want to
-    wait for the in-app auto-update (which has up to 4-hour jitter).
-
     SuperOps runtime variables required:
         $OpServiceAccountToken   - 1Password service account token (masked policy variable)
                                    1Password item: chat-bracer-ca > Service Account Auth Token: chat-bracer-ca-superops
+        $OverrideCooldown        - Set to 1 to bypass the 5-minute cooldown guard (default: 0)
 
 .NOTES
-    Version:        1.0
+    Version:        2.0
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-24
+    Updated:        2026-03-30 — Removed in-app self-updater, added version
+                    skip and SHA-256 verification with retry.
 #>
 
 #Requires -Version 5.1
@@ -31,9 +34,12 @@
 # Constants
 # ---------------------------------------------------------------------------
 $AsarUrl         = 'https://chat.bracer.ca/install/app-latest.asar'
+$HashUrl         = 'https://chat.bracer.ca/install/app-latest.asar.sha256'
+$VersionUrl      = 'https://chat.bracer.ca/install/latest.txt'
 $AsarDest        = 'C:\Program Files\Bracer Chat\resources\app.asar'
 $AppExe          = 'C:\Program Files\Bracer Chat\Bracer Chat.exe'
 $InstallerUrl    = 'https://chat.bracer.ca/install/BracerChat-Setup-latest.exe'
+$MaxRetries      = 3
 $OpTempDir       = Join-Path $env:TEMP 'bracer-op'
 $OpExePath       = Join-Path $OpTempDir 'op.exe'
 $OpCliUrl        = 'https://cache.agilebits.com/dist/1P/op2/pkg/v2.33.0/op_windows_amd64_v2.33.0.zip'
@@ -112,7 +118,9 @@ function Remove-StaleTasks {
         'BracerChatAsarRelaunch',
         'BracerChatAsarUpdate',
         'BracerChatRelaunch',
+        'BracerChatRelaunchAsar',
         'BracerChatUpdate',
+        'BracerChatUpdateAsar',
         'BracerChatPostInstallLaunch'
     )
     foreach ($TaskName in $StaleTasks) {
@@ -205,6 +213,83 @@ function Invoke-FullInstall {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Version check — get installed version from the app's package.json inside asar.
+# Returns "0.0.0" if the app isn't installed or version can't be read.
+# ---------------------------------------------------------------------------
+function Get-InstalledVersion {
+    $PackageJson = 'C:\Program Files\Bracer Chat\resources\app.asar'
+    if (-not (Test-Path $PackageJson)) { return '0.0.0' }
+    # app.asar is an archive but package.json is at the start — read first 4KB
+    try {
+        $Bytes = [System.IO.File]::ReadAllBytes($PackageJson)
+        $Text  = [System.Text.Encoding]::UTF8.GetString($Bytes)
+        if ($Text -match '"version"\s*:\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+            return $Matches[1]
+        }
+    } catch { }
+    return '0.0.0'
+}
+
+function Get-ServerVersion {
+    param([string]$AuthHeader)
+    try {
+        $Response = Invoke-WebRequest -Uri $VersionUrl -Headers @{ Authorization = $AuthHeader } -UseBasicParsing -ErrorAction Stop
+        return $Response.Content.Trim()
+    } catch {
+        Log-Message "Failed to fetch server version: $($_.Exception.Message)" -Level 'WARNING'
+        return $null
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Download asar with SHA-256 verification. Retries up to $MaxRetries times
+# on hash mismatch (re-downloads both file and hash on each retry).
+# ---------------------------------------------------------------------------
+function Download-VerifiedAsar {
+    param([string]$AuthHeader, [string]$DestPath)
+
+    for ($Attempt = 1; $Attempt -le $MaxRetries; $Attempt++) {
+        Log-Message "Download attempt ${Attempt}/${MaxRetries}..."
+
+        # Download the SHA-256 hash file first
+        try {
+            $HashResponse = Invoke-WebRequest -Uri $HashUrl -Headers @{ Authorization = $AuthHeader } -UseBasicParsing -ErrorAction Stop
+            $ExpectedHash = $HashResponse.Content.Trim().ToUpper()
+            Log-Message "Expected SHA-256: ${ExpectedHash}"
+        } catch {
+            Log-Message "Hash file download failed: $($_.Exception.Message)" -Level 'WARNING'
+            if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds 5; continue }
+            throw "Failed to download SHA-256 hash after ${MaxRetries} attempts."
+        }
+
+        # Download the asar
+        try {
+            Invoke-WebRequest -Uri $AsarUrl -Headers @{ Authorization = $AuthHeader } -OutFile $DestPath -UseBasicParsing -ErrorAction Stop
+            $SizeMB = [math]::Round((Get-Item $DestPath).Length / 1MB, 1)
+            Log-Message "Downloaded ${SizeMB} MB."
+        } catch {
+            Remove-Item $DestPath -Force -ErrorAction SilentlyContinue
+            Log-Message "ASAR download failed: $($_.Exception.Message)" -Level 'WARNING'
+            if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds 5; continue }
+            throw "Failed to download ASAR after ${MaxRetries} attempts."
+        }
+
+        # Verify SHA-256
+        $ActualHash = (Get-FileHash -Path $DestPath -Algorithm SHA256).Hash.ToUpper()
+        if ($ActualHash -eq $ExpectedHash) {
+            Log-Message "SHA-256 verified OK."
+            return
+        }
+
+        Log-Message "SHA-256 MISMATCH! Expected ${ExpectedHash}, got ${ActualHash}" -Level 'WARNING'
+        Remove-Item $DestPath -Force -ErrorAction SilentlyContinue
+        if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds 5 }
+    }
+
+    throw "ASAR SHA-256 verification failed after ${MaxRetries} attempts. Update aborted."
+}
+
 function Invoke-AsarUpdate {
     param(
         [Parameter(Mandatory = $true)]
@@ -220,24 +305,25 @@ function Invoke-AsarUpdate {
         return
     }
 
+    # Check if update is needed — skip if already at server version
+    $InstalledVersion = Get-InstalledVersion
+    $ServerVersion    = Get-ServerVersion -AuthHeader $AuthHeader
+    if ($null -ne $ServerVersion -and $InstalledVersion -eq $ServerVersion) {
+        Log-Message "Already at v${InstalledVersion} — no update needed. Exiting."
+        return
+    }
+    Log-Message "Version check: installed v${InstalledVersion}, server v${ServerVersion}. Updating..."
+
+    # Download and verify the asar (retries up to $MaxRetries on hash mismatch)
+    $TempAsar = Join-Path $env:TEMP 'BracerChatUpdate.asar'
+    Download-VerifiedAsar -AuthHeader $AuthHeader -DestPath $TempAsar
+
     # Stop running instance so the asar file isn't locked
     $RunningProc = Get-Process -Name 'Bracer Chat' -ErrorAction SilentlyContinue
     if ($RunningProc) {
         Log-Message "Stopping Bracer Chat before update."
         Stop-Process -Name 'Bracer Chat' -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
-    }
-
-    # Download asar to temp
-    $TempAsar = Join-Path $env:TEMP 'BracerChatUpdate.asar'
-    Log-Message "Downloading app.asar from ${AsarUrl}..."
-    try {
-        Invoke-WebRequest -Uri $AsarUrl -Headers @{ Authorization = $AuthHeader } -OutFile $TempAsar -UseBasicParsing -ErrorAction Stop
-        $SizeMB = [math]::Round((Get-Item $TempAsar).Length / 1MB, 1)
-        Log-Message "Downloaded ${SizeMB} MB."
-    } catch {
-        Log-Message "Download failed: $($_.Exception.Message)" -Level 'ERROR'
-        throw
     }
 
     # Replace asar with retry loop (file may still be releasing)
@@ -260,16 +346,7 @@ function Invoke-AsarUpdate {
         throw "Failed to replace app.asar after 10 attempts."
     }
 
-    Log-Message "app.asar replaced successfully."
-
-    # app.asar is now updated via SYSTEM scheduled task — no Users modify needed.
-    # Remove any legacy Users modify ACL on app.asar (security hardening H2).
-    try {
-        icacls $AsarDest /remove '*S-1-5-32-545' /Q | Out-Null
-        Log-Message "Removed Users modify rights on app.asar (SYSTEM task handles updates now)."
-    } catch {
-        Log-Message "icacls remove on app.asar failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
-    }
+    Log-Message "app.asar replaced successfully (v${InstalledVersion} -> v${ServerVersion})."
 
     # Grant BUILTIN\Users modify rights on ProgramData\BracerChat so the app
     # can write window-prefs.json, update logs, etc. without elevation.
@@ -293,16 +370,6 @@ function Invoke-AsarUpdate {
         }
     }
 
-    # Create secure staging directory for in-app updates — SYSTEM-only, no user write.
-    $UpdateDir = 'C:\ProgramData\BracerChat\updates'
-    if (-not (Test-Path $UpdateDir)) { New-Item -Path $UpdateDir -ItemType Directory -Force | Out-Null }
-    try {
-        icacls $UpdateDir /inheritance:r /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' /Q | Out-Null
-        Log-Message "Secure updates directory created at $UpdateDir."
-    } catch {
-        Log-Message "icacls on updates dir failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
-    }
-
     Start-BracerChatAsUser
 }
 
@@ -316,6 +383,32 @@ if ($null -eq $Global:DefaultLogFile) {
 }
 
 Log-Message "=== Bracer Chat Update Script started (ASAR with full-install fallback) ==="
+
+# ---------------------------------------------------------------------------
+# Duplicate execution guard — skip if another instance ran within 5 minutes.
+# SuperOps queues scripts while assets are offline and fires them all at once
+# on reconnect, which can cause 10+ simultaneous copies of this script.
+# ---------------------------------------------------------------------------
+$LockFile = 'C:\ProgramData\BracerChat\update-lastrun.txt'
+$CooldownSeconds = 300  # 5 minutes
+if ($OverrideCooldown -eq 1) {
+    Log-Message "Cooldown override enabled — skipping duplicate execution check."
+} elseif (Test-Path $LockFile) {
+    try {
+        $LastRun = [datetime]::Parse((Get-Content $LockFile -Raw).Trim())
+        $Elapsed = ((Get-Date) - $LastRun).TotalSeconds
+        if ($Elapsed -lt $CooldownSeconds) {
+            Log-Message "Another instance ran $([math]::Round($Elapsed))s ago (cooldown ${CooldownSeconds}s). Exiting."
+            exit 0
+        }
+    } catch {
+        # Corrupt lockfile — ignore and proceed
+    }
+}
+# Write lockfile immediately so concurrent instances see it
+$LockDir = Split-Path $LockFile -Parent
+if (-not (Test-Path $LockDir)) { New-Item -Path $LockDir -ItemType Directory -Force | Out-Null }
+Set-Content -Path $LockFile -Value (Get-Date -Format 'o') -Force
 
 if ([string]::IsNullOrEmpty($OpServiceAccountToken)) {
     Log-Message 'CRITICAL: $OpServiceAccountToken is missing.' -Level 'ERROR'

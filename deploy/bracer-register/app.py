@@ -1038,8 +1038,8 @@ async def machine_reauth(body: ReauthRequest, request: Request):
 
 
 @app.get("/api/update/asar")
-async def update_asar(request: Request, sig: str = None):
-    """Stream the latest app.asar or return its Ed25519 signature (?sig=1).
+async def update_asar(request: Request):
+    """Stream the latest app.asar (legacy endpoint — updates now pushed via SuperOps).
     Requires a valid machine Matrix access token."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
@@ -1050,16 +1050,6 @@ async def update_asar(request: Request, sig: str = None):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     asar_path = "/var/www/install/app-latest.asar"
-
-    # Return signature if requested
-    if sig == "1":
-        sig_path = asar_path + ".sig"
-        if not os.path.exists(sig_path):
-            raise HTTPException(status_code=503, detail="Signature not available")
-        with open(sig_path) as f:
-            signature = f.read().strip()
-        return {"signature": signature}
-
     if not os.path.exists(asar_path):
         raise HTTPException(status_code=503, detail="ASAR not available")
 
@@ -1077,8 +1067,8 @@ async def update_asar(request: Request, sig: str = None):
 
 
 @app.get("/api/update/download")
-async def update_download(request: Request, sig: str = None):
-    """Stream the latest installer EXE or return its Ed25519 signature (?sig=1).
+async def update_download(request: Request):
+    """Stream the latest installer EXE (legacy endpoint — updates now pushed via SuperOps).
     Requires a valid machine Matrix access token."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
@@ -1089,16 +1079,6 @@ async def update_download(request: Request, sig: str = None):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     exe_path = os.path.realpath(INSTALL_EXE_PATH)
-
-    # Return signature if requested
-    if sig == "1":
-        sig_path = exe_path + ".sig"
-        if not os.path.exists(sig_path):
-            raise HTTPException(status_code=503, detail="Signature not available")
-        with open(sig_path) as f:
-            signature = f.read().strip()
-        return {"signature": signature}
-
     if not os.path.exists(exe_path):
         raise HTTPException(status_code=503, detail="Installer not available")
 
