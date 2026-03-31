@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import aiohttp
-from nio import AsyncClient, AsyncClientConfig, LoginResponse, RoomMessageText, RoomMessageImage, SyncResponse
+from nio import AsyncClient, AsyncClientConfig, JoinedMembersResponse, LoginResponse, RoomMessageText, RoomMessageImage, SyncResponse
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -127,7 +127,7 @@ def init_db():
             conn.execute("ALTER TABLE greeted_rooms ADD COLUMN company TEXT")
         except sqlite3.OperationalError:
             pass
-        for col in ("tried TEXT", "reproduce TEXT", "when_started TEXT", "pending_ticket_id TEXT", "screenshot_mxc TEXT"):
+        for col in ("tried TEXT", "reproduce TEXT", "when_started TEXT", "pending_ticket_id TEXT", "screenshot_mxc TEXT", "staff_triggered INTEGER DEFAULT 0", "initiating_staff TEXT"):
             try:
                 conn.execute(f"ALTER TABLE ticket_sessions ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -171,7 +171,8 @@ def get_company(room_id: str) -> str | None:
 def get_ticket_session(room_id: str):
     with _db() as conn:
         row = conn.execute(
-            "SELECT state, issue, tried, reproduce, when_started, last_activity "
+            "SELECT state, issue, tried, reproduce, when_started, last_activity, "
+            "staff_triggered, initiating_staff "
             "FROM ticket_sessions WHERE room_id = ?",
             (room_id,),
         ).fetchone()
@@ -184,11 +185,13 @@ def get_ticket_session(room_id: str):
         clear_ticket_session(room_id)
         return None
     return {
-        "state":        row["state"],
-        "issue":        row["issue"],
-        "tried":        row["tried"],
-        "reproduce":    row["reproduce"],
-        "when_started": row["when_started"],
+        "state":            row["state"],
+        "issue":            row["issue"],
+        "tried":            row["tried"],
+        "reproduce":        row["reproduce"],
+        "when_started":     row["when_started"],
+        "staff_triggered":  bool(row["staff_triggered"]),
+        "initiating_staff": row["initiating_staff"],
     }
 
 
@@ -199,13 +202,27 @@ def set_ticket_session(
     tried: str = None,
     reproduce: str = None,
     when_started: str = None,
+    staff_triggered: bool | None = None,
+    initiating_staff: str | None = None,
 ):
     with _db() as conn:
+        if staff_triggered is None or initiating_staff is None:
+            existing = conn.execute(
+                "SELECT staff_triggered, initiating_staff FROM ticket_sessions WHERE room_id = ?",
+                (room_id,),
+            ).fetchone()
+            if existing:
+                if staff_triggered is None:
+                    staff_triggered = bool(existing["staff_triggered"])
+                if initiating_staff is None:
+                    initiating_staff = existing["initiating_staff"]
         conn.execute(
             "INSERT OR REPLACE INTO ticket_sessions "
-            "(room_id, state, issue, tried, reproduce, when_started, last_activity) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (room_id, state, issue, tried, reproduce, when_started, _now()),
+            "(room_id, state, issue, tried, reproduce, when_started, last_activity, "
+            "staff_triggered, initiating_staff) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (room_id, state, issue, tried, reproduce, when_started, _now(),
+             int(staff_triggered or False), initiating_staff),
         )
 
 
@@ -805,6 +822,11 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
             "Please call us at 1-888-272-2371 or email support@bracersystems.com.")
         return
 
+    initiated_note = ""
+    if session.get("initiating_staff"):
+        staff_label = session["initiating_staff"].split(":")[0].lstrip("@").replace(".", " ").title()
+        initiated_note = f"\nInitiated by: Technician {html.escape(staff_label)} (on client's behalf)"
+
     description = (
         f"Issue: {html.escape(issue)}\n\n"
         f"What was tried: {html.escape(session['tried'] or 'N/A')}\n\n"
@@ -812,6 +834,7 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
         f"When it started / recent changes: {html.escape(session['when_started'] or 'N/A')}\n\n"
         f"Screenshot: {'Attached' if screenshot_mxc else 'None provided'}\n\n"
         f"---\nMachine: {html.escape(hostname)}\nCompany: {html.escape(company)}\nRoom: {html.escape(room_id)}"
+        f"{initiated_note}"
     )
 
     try:
@@ -866,6 +889,36 @@ def _truncate(text: str) -> str:
     return text[:INPUT_MAX_LEN] if len(text) > INPUT_MAX_LEN else text
 
 
+async def _get_room_client_displayname(client: AsyncClient, room_id: str) -> str | None:
+    """Return the display name of the non-staff, non-bot user in the support room."""
+    try:
+        resp = await client.joined_members(room_id)
+        if not isinstance(resp, JoinedMembersResponse):
+            return None
+        for user_id, member_info in resp.members.items():
+            if user_id == BOT_USER_ID or user_id in STAFF_USERS:
+                continue
+            return member_info.display_name or user_id.split(":")[0].lstrip("@")
+    except Exception:
+        return None
+
+
+async def _handle_staff_ticket_trigger(
+    client: AsyncClient, room, room_id: str, sender: str, log
+):
+    """Handle !ticket command from a staff user — start the ticket flow addressing the client."""
+    if count_recent_tickets(room_id) >= TICKET_RATE_LIMIT:
+        await _send(client, room_id,
+            "Rate limit reached for this room. Please open a ticket manually in SuperOps.")
+        return
+    client_name = await _get_room_client_displayname(client, room_id)
+    name_part = f" {client_name}," if client_name else ""
+    set_ticket_session(room_id, "await_issue", staff_triggered=True, initiating_staff=sender)
+    await _send(client, room_id,
+        f"I'll help create a ticket.{name_part} Can you describe the issue?")
+    log.info(f"Staff-triggered !ticket started room={room_id} staff={sender}")
+
+
 # ── Message handler ────────────────────────────────────────────────────────────
 
 startup_ts: int = 0  # milliseconds — set in main() before sync
@@ -888,11 +941,21 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
     # Record activity for ALL senders (staff, bot, customers) so idle tracking works
     _record_room_activity(room_id)
 
-    # Ignore self and staff for all other bot behaviour
-    if sender == BOT_USER_ID or sender in STAFF_USERS:
+    # Ignore self
+    if sender == BOT_USER_ID:
         return
 
-    # Send autoresponder if room was idle long enough
+    # Staff: can trigger !ticket or advance a staff-triggered session
+    if sender in STAFF_USERS:
+        if body.lower() == "!ticket":
+            await _handle_staff_ticket_trigger(client, room, room_id, sender, log)
+            return
+        _st_session = get_ticket_session(room_id)
+        if not (_st_session and _st_session.get("staff_triggered")):
+            return
+        # Fall through to session handling below for staff-triggered sessions
+
+    # Send autoresponder if room was idle long enough (non-staff only)
     if should_autorespond:
         msg = _get_autoresponder_message()
         if msg:
@@ -1049,12 +1112,19 @@ async def on_image(client: AsyncClient, room, event: RoomMessageImage):
     # Record activity for idle tracking (all senders)
     _record_room_activity(room_id)
 
-    # Ignore self and staff
-    if sender == BOT_USER_ID or sender in STAFF_USERS:
+    # Ignore self
+    if sender == BOT_USER_ID:
         return
 
     mxc_url = event.url
     if not mxc_url:
+        return
+
+    # Staff: allow screenshots only in staff-triggered sessions
+    if sender in STAFF_USERS:
+        _st_session = get_ticket_session(room_id)
+        if _st_session and _st_session.get("staff_triggered"):
+            await _handle_ticket_image(client, room, room_id, mxc_url, log)
         return
 
     is_guest = _is_guest_sender(sender)
