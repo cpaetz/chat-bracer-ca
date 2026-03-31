@@ -583,7 +583,6 @@ app.on('ready', async () => {
 
     // Popup for machine room and broadcast rooms
     const isBroadcast = roomId === session.room_id_broadcast || roomId === session.room_id_company;
-    if (isBroadcast) console.log('[BracerChat] broadcast match — broadcastId:', session.room_id_broadcast, 'companyId:', session.room_id_company, 'eventRoomId:', roomId);
     if (roomId === session.room_id_machine || isBroadcast) {
       const prefs = readWindowPrefs();
       const onTop = prefs.alwaysOnTop !== undefined ? prefs.alwaysOnTop : true;

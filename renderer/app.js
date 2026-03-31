@@ -803,23 +803,18 @@ function renderPoll(event, prepend = false) {
 }
 
 async function handleIncomingMessage({ roomId, event }) {
-  console.log('[app] handleIncomingMessage roomId:', roomId, 'type:', event.type, 'sender:', event.sender, 'eventId:', event.event_id);
-
   if (event.event_id && document.querySelector(`[data-event-id="${CSS.escape(event.event_id)}"]`)) {
-    console.log('[app] dedup: event already in DOM, skipping', event.event_id);
     return;
   }
 
   // Broadcast rooms — render as announcement above the chat
   if (sessionInfo && roomId === sessionInfo.broadcastRoomId) {
-    console.log('[app] matched broadcastRoomId — rendering Bracer broadcast');
     playNotificationSound();
     renderBroadcast(event, 'Bracer Systems Broadcast');
     scrollToBottom();
     return;
   }
   if (sessionInfo && roomId === sessionInfo.companyRoomId) {
-    console.log('[app] matched companyRoomId — rendering company broadcast');
     playNotificationSound();
     renderBroadcast(event, `${sessionInfo.companyName} Broadcast`);
     scrollToBottom();
@@ -827,8 +822,6 @@ async function handleIncomingMessage({ roomId, event }) {
   }
 
   if (roomId !== activeRoomId) {
-    console.log('[app] ignoring event — roomId', roomId, 'not activeRoomId', activeRoomId,
-      'nor broadcastRoomId', sessionInfo?.broadcastRoomId, 'nor companyRoomId', sessionInfo?.companyRoomId);
     return;
   }
 
@@ -927,11 +920,9 @@ function renderBroadcast(event, label) {
   // Deduplicate — same event can arrive via both history load and live sync
   const dedupKey = event.event_id || `${event.origin_server_ts}_${event.sender}`;
   if (renderedBroadcastIds.has(dedupKey)) {
-    console.log('[app] renderBroadcast: dedup hit for', dedupKey);
     return;
   }
   renderedBroadcastIds.add(dedupKey);
-  console.log('[app] renderBroadcast: rendering', label, 'eventId:', event.event_id, 'body:', (event.content.body || '').slice(0, 60));
 
   const wrap = document.createElement('div');
   wrap.className       = 'broadcast-message';
