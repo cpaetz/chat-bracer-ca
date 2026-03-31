@@ -859,7 +859,7 @@
       var pad = function(n) { return String(n).padStart(2, '0'); };
       var dateStr = ts.getFullYear() + '-' + pad(ts.getMonth() + 1) + '-' + pad(ts.getDate());
       var timeStr = pad(ts.getHours()) + ':' + pad(ts.getMinutes()) + ':' + pad(ts.getSeconds());
-      lines.push(dateStr + ' ' + timeStr + ' - ' + msg.sender_display + ': ' + msg.body);
+      lines.push(dateStr + ' ' + timeStr + ' - ' + msg.sender_display + ': ' + msg.body.trim());
     });
     if (lines.length === 0) { toast('No messages selected', 'error'); return; }
     navigator.clipboard.writeText(lines.join('\n')).then(function() {
