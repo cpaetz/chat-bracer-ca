@@ -912,10 +912,13 @@
           '<div class="message">' + esc(r.last_message_body) + '</div>' +
           '<div class="meta">' + esc(r.last_message_from) + ' &bull; ' + esc(timeAgo) + '</div>' +
         '</div>' +
-        '<button class="unreplied-dismiss" onclick="dismissRoom(' +
-          JSON.stringify(r.room_id) + ',' + JSON.stringify(r.last_message_event_id) +
-        ')">No reply needed</button>';
+        '<button class="unreplied-dismiss">No reply needed</button>';
       listEl.appendChild(row);
+      (function(rid, eid) {
+        row.querySelector('.unreplied-dismiss').addEventListener('click', function() {
+          dismissRoom(rid, eid);
+        });
+      })(r.room_id, r.last_message_event_id);
     });
   }
 
