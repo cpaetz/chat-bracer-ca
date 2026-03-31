@@ -1702,3 +1702,104 @@ async def admin_broadcast(request: Request):
 
     logger.info(f"Broadcast by {user_id}: target={target} rooms={len(rooms_sent)}")
     return {"ok": True, "rooms_sent": len(rooms_sent)}
+
+
+@app.get("/api/admin/messages")
+async def admin_messages(
+    request: Request,
+    room_id: str = "",
+    from_ts: int = 0,
+    to_ts: int = 0,
+):
+    """Fetch messages from a machine support room within a time window for the conversation viewer."""
+    await _validate_admin_session(request)
+
+    if not room_id.startswith("!"):
+        raise HTTPException(status_code=400, detail="room_id must start with '!'")
+    if from_ts <= 0 or to_ts <= 0:
+        raise HTTPException(status_code=400, detail="from_ts and to_ts are required")
+    if from_ts >= to_ts:
+        raise HTTPException(status_code=400, detail="from_ts must be less than to_ts")
+    if to_ts - from_ts > 86_400_000:
+        raise HTTPException(status_code=400, detail="Time window cannot exceed 24 hours")
+
+    admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+    bot_user = f"@bracerbot:{SERVER_NAME}"
+    MAX_MESSAGES = 500
+
+    collected = []
+    truncated = False
+    end_token = None
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Paginate backward to collect events in the window
+        while True:
+            url = f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{urlquote(room_id, safe='')}/messages?dir=b&limit=100"
+            if end_token:
+                url += f"&from={end_token}"
+
+            resp = await client.get(url, headers=admin_headers)
+            if resp.status_code != 200:
+                logger.warning(f"admin_messages: Synapse error {resp.status_code} for room {room_id}")
+                raise HTTPException(status_code=502, detail="Failed to fetch messages from Synapse")
+
+            data = resp.json()
+            chunk = data.get("chunk", [])
+            end_token = data.get("end")
+
+            stop_early = False
+            for event in chunk:
+                ts = event.get("origin_server_ts", 0)
+                if ts < from_ts:
+                    stop_early = True
+                    break
+                if ts > to_ts:
+                    continue
+                if event.get("type") != "m.room.message":
+                    continue
+                content = event.get("content", {})
+                if content.get("msgtype") != "m.text":
+                    continue
+                if event.get("sender", "") == bot_user:
+                    continue
+                collected.append(event)
+                if len(collected) >= MAX_MESSAGES:
+                    truncated = True
+                    stop_early = True
+                    break
+
+            if stop_early or not chunk or not end_token:
+                break
+
+        # Resolve display names once per unique sender
+        display_names: dict = {}
+        for event in collected:
+            sender = event.get("sender", "")
+            if sender not in display_names:
+                resp = await client.get(
+                    f"{SYNAPSE_URL}/_synapse/admin/v2/users/{urlquote(sender, safe='')}",
+                    headers=admin_headers,
+                )
+                if resp.status_code == 200:
+                    display_names[sender] = resp.json().get("displayname") or sender
+                else:
+                    display_names[sender] = sender
+
+    # Sort ascending by timestamp before returning
+    collected.sort(key=lambda e: e.get("origin_server_ts", 0))
+
+    messages = []
+    for event in collected:
+        ts_ms = event.get("origin_server_ts", 0)
+        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts_ms / 1000))
+        sender = event.get("sender", "")
+        messages.append({
+            "timestamp": ts_iso,
+            "sender_display": display_names.get(sender, sender),
+            "sender_id": sender,
+            "body": event.get("content", {}).get("body", ""),
+            "event_id": event.get("event_id", ""),
+        })
+
+    logger.info(f"admin_messages: room={room_id} from={from_ts} to={to_ts} count={len(messages)} truncated={truncated}")
+    return {"messages": messages, "truncated": truncated}

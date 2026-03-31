@@ -202,6 +202,35 @@
     .header { flex-wrap: wrap; }
     .modal { width: 95%; margin: 16px; }
   }
+
+  /* Conversation Viewer */
+  .conv-controls {
+    display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px;
+  }
+  .conv-controls label { font-size: 12px; color: #666; display: flex; flex-direction: column; gap: 4px; }
+  .conv-controls input[type="date"],
+  .conv-controls input[type="time"] {
+    padding: 7px 10px; border: 1px solid #e0e0e0; border-radius: 6px;
+    font-size: 13px; font-family: inherit; outline: none;
+  }
+  .conv-controls input:focus { border-color: #2099c6; }
+  .conv-list {
+    max-height: 400px; overflow-y: auto; border: 1px solid #f0f0f0; border-radius: 8px;
+    margin-bottom: 8px;
+  }
+  .conv-row {
+    display: flex; align-items: baseline; gap: 10px; padding: 8px 12px;
+    border-bottom: 1px solid #f7f7f7; font-size: 13px;
+  }
+  .conv-row:nth-child(even) { background: #f9fafb; }
+  .conv-row:last-child { border-bottom: none; }
+  .conv-checkbox { flex-shrink: 0; cursor: pointer; accent-color: #2099c6; }
+  .conv-time { color: #999; font-size: 11px; white-space: nowrap; min-width: 65px; }
+  .conv-sender { font-weight: 600; color: #2099c6; white-space: nowrap; min-width: 120px; }
+  .conv-body { flex: 1; color: #333; word-break: break-word; }
+  .conv-footer { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+  .conv-empty { text-align: center; padding: 30px; color: #999; font-size: 14px; }
+  .conv-truncated { font-size: 12px; color: #f8941b; padding: 4px 0 8px; }
 </style>
 </head>
 <body>
@@ -304,6 +333,38 @@
         </div>
       </div>
 
+      <div class="section" id="conv-section">
+        <h2>Conversation Viewer</h2>
+        <div class="conv-controls">
+          <label>Machine
+            <select class="field" id="conv-machine" style="min-width:220px;">
+              <option value="">— select a machine —</option>
+            </select>
+          </label>
+          <label>Date
+            <input type="date" id="conv-date">
+          </label>
+          <label>Start
+            <input type="time" id="conv-start" value="00:00">
+          </label>
+          <label>End
+            <input type="time" id="conv-end" value="23:59">
+          </label>
+          <button class="btn btn-primary" onclick="loadConversation()" style="align-self:flex-end;">Load</button>
+        </div>
+        <div id="conv-loading" class="loading" style="display:none;padding:20px;">
+          <div class="spinner"></div><br>Loading messages...
+        </div>
+        <div id="conv-list" class="conv-list" style="display:none;"></div>
+        <div id="conv-truncated" class="conv-truncated" style="display:none;">
+          Showing first 500 messages only — narrow the time range to see more.
+        </div>
+        <div id="conv-footer" class="conv-footer" style="display:none;">
+          <button class="btn btn-ghost btn-sm" onclick="convToggleAll()">Select All</button>
+          <button class="btn btn-primary btn-sm" onclick="convCopySelected()">Copy Selected</button>
+        </div>
+      </div>
+
       <div class="section" id="company-section">
         <h2>Clients <span class="count-badge" id="client-count-badge">0</span></h2>
         <input type="text" class="field" id="client-search" placeholder="Search by company or hostname..."
@@ -397,6 +458,22 @@
         select.appendChild(opt);
       }
     });
+
+    // Populate conversation viewer machine dropdown
+    var convSelect = document.getElementById('conv-machine');
+    convSelect.innerHTML = '<option value="">— select a machine —</option>';
+    Object.keys(data.companies).sort().forEach(function(coName) {
+      var co = data.companies[coName];
+      co.machines.sort(function(a,b){ return a.hostname.localeCompare(b.hostname); }).forEach(function(m) {
+        if (!m.machine_room) return;
+        var opt = document.createElement('option');
+        opt.value = m.machine_room;
+        opt.textContent = m.hostname + ' (' + coName + ')';
+        convSelect.appendChild(opt);
+      });
+    });
+    // Default date to today
+    document.getElementById('conv-date').value = new Date().toISOString().slice(0, 10);
 
     renderCompanies(data);
   }
@@ -667,6 +744,93 @@
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
   });
+
+  window.loadConversation = function() {
+    var roomId = document.getElementById('conv-machine').value;
+    var date = document.getElementById('conv-date').value;
+    var start = document.getElementById('conv-start').value || '00:00';
+    var end = document.getElementById('conv-end').value || '23:59';
+    if (!roomId) { toast('Select a machine first', 'error'); return; }
+    if (!date) { toast('Select a date', 'error'); return; }
+    var fromTs = new Date(date + 'T' + start + ':00').getTime();
+    var toTs = new Date(date + 'T' + end + ':59').getTime();
+    if (isNaN(fromTs) || isNaN(toTs) || fromTs >= toTs) {
+      toast('Invalid time range', 'error'); return;
+    }
+    document.getElementById('conv-list').style.display = 'none';
+    document.getElementById('conv-footer').style.display = 'none';
+    document.getElementById('conv-truncated').style.display = 'none';
+    document.getElementById('conv-loading').style.display = 'block';
+    var url = '/api/admin/messages?room_id=' + encodeURIComponent(roomId) +
+              '&from_ts=' + fromTs + '&to_ts=' + toTs;
+    fetch(url, { credentials: 'same-origin' })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        document.getElementById('conv-loading').style.display = 'none';
+        var listEl = document.getElementById('conv-list');
+        listEl.innerHTML = '';
+        if (!data.messages || data.messages.length === 0) {
+          listEl.innerHTML = '<div class="conv-empty">No messages in this time range.</div>';
+          listEl.style.display = 'block';
+          return;
+        }
+        data.messages.forEach(function(msg, i) {
+          var row = document.createElement('div');
+          row.className = 'conv-row';
+          var ts = new Date(msg.timestamp);
+          var timeStr = ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          row.innerHTML =
+            '<input type="checkbox" class="conv-checkbox" data-idx="' + i + '">' +
+            '<span class="conv-time">' + timeStr + '</span>' +
+            '<span class="conv-sender">' + esc(msg.sender_display) + '</span>' +
+            '<span class="conv-body">' + esc(msg.body) + '</span>';
+          listEl.appendChild(row);
+        });
+        listEl._messages = data.messages;
+        listEl.style.display = 'block';
+        document.getElementById('conv-footer').style.display = 'flex';
+        if (data.truncated) {
+          document.getElementById('conv-truncated').style.display = 'block';
+        }
+      })
+      .catch(function() {
+        document.getElementById('conv-loading').style.display = 'none';
+        toast('Failed to load messages', 'error');
+      });
+  };
+
+  window.convToggleAll = function() {
+    var listEl = document.getElementById('conv-list');
+    var boxes = listEl.querySelectorAll('.conv-checkbox');
+    var allChecked = Array.from(boxes).every(function(cb) { return cb.checked; });
+    boxes.forEach(function(cb) { cb.checked = !allChecked; });
+    document.querySelector('#conv-footer .btn-ghost').textContent = allChecked ? 'Select All' : 'Deselect All';
+  };
+
+  window.convCopySelected = function() {
+    var listEl = document.getElementById('conv-list');
+    var messages = listEl._messages || [];
+    var lines = [];
+    listEl.querySelectorAll('.conv-checkbox').forEach(function(cb, i) {
+      if (!cb.checked) return;
+      var msg = messages[i];
+      if (!msg) return;
+      var ts = new Date(msg.timestamp);
+      var pad = function(n) { return String(n).padStart(2, '0'); };
+      var dateStr = ts.getFullYear() + '-' + pad(ts.getMonth() + 1) + '-' + pad(ts.getDate());
+      var timeStr = pad(ts.getHours()) + ':' + pad(ts.getMinutes()) + ':' + pad(ts.getSeconds());
+      lines.push(dateStr + ' ' + timeStr + ' - ' + msg.sender_display + ': ' + msg.body);
+    });
+    if (lines.length === 0) { toast('No messages selected', 'error'); return; }
+    navigator.clipboard.writeText(lines.join('\n')).then(function() {
+      toast('Copied!', 'success');
+    }).catch(function() {
+      toast('Copy failed — try selecting manually', 'error');
+    });
+  };
 
   init();
 })();
