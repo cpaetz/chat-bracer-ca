@@ -897,18 +897,15 @@ def _filter_log_lines(content: bytes) -> bytes:
 
 @app.get("/api/update/check")
 async def update_check(request: Request):
-    """Return the current app version and update type.
-    Accepts auth token if provided (v1.0.58+), but allows unauthenticated
-    requests for backwards compatibility with v1.0.57 clients that don't
-    send auth on this endpoint. Auth will be required once fleet is on v1.0.58+.
-    """
+    """Return the current app version and update type. Requires a valid Bearer token."""
     auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:]
-        hostname = await _validate_machine_token(token, request.client.host)
-        if hostname:
-            logger.info(f"Update check (authenticated): hostname={hostname}")
-        # If token is invalid, still allow the check — don't block old clients
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization required")
+    token = auth[7:]
+    hostname = await _validate_machine_token(token, request.client.host)
+    if not hostname:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    logger.info(f"Update check (authenticated): hostname={hostname}")
 
     try:
         with open("/var/www/install/latest.txt") as f:
