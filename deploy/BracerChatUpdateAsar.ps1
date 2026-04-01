@@ -24,7 +24,7 @@
     Version:        2.0
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-24
-    Updated:        2026-03-30 — Removed in-app self-updater, added version
+    Updated:        2026-03-30 - Removed in-app self-updater, added version
                     skip and SHA-256 verification with retry.
 #>
 
@@ -162,22 +162,33 @@ function Remove-StaleTasks {
 # ---------------------------------------------------------------------------
 # Relaunch app in the logged-in user's interactive session via scheduled task.
 # GroupId BUILTIN\Users fires in the interactive session without needing the
-# exact username — more robust than WMI username lookup.
+# exact username - more robust than WMI username lookup.
 # ---------------------------------------------------------------------------
 function Start-BracerChatAsUser {
     if (-not (Test-Path $AppExe)) {
-        Log-Message "App not found at $AppExe - skipping relaunch." -Level 'WARNING'
+        Log-Message ("App not found at " + $AppExe + " - skipping relaunch.") -Level 'WARNING'
         return
     }
+
+    # Wait for old process to fully exit before relaunching.
+    # The single-instance lock in Electron will reject a new launch if the
+    # old process is still shutting down.
+    Log-Message "Waiting for old process to fully exit..."
+    for ($w = 0; $w -lt 15; $w++) {
+        if (-not (Get-Process -Name 'Bracer Chat' -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Seconds 1
+    }
+    Start-Sleep -Seconds 2  # Extra buffer for file handle release
+
     $TaskName = 'BracerChatAsarRelaunch'
     try {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         $Action    = New-ScheduledTaskAction -Execute "`"$AppExe`"" -Argument '--startup'
-        $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
+        $Trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(30)
         $Settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
         $Principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
         Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
-        Log-Message "Relaunch task registered - fires in ~10 s for all logged-in users."
+        Log-Message "Relaunch task registered - fires in ~30 s for all logged-in users."
     } catch {
         Log-Message "Failed to register relaunch task: $($_.Exception.Message)" -Level 'WARNING'
     }
@@ -216,13 +227,13 @@ function Invoke-FullInstall {
 # Main
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# Version check — get installed version from the app's package.json inside asar.
+# Version check - get installed version from the app's package.json inside asar.
 # Returns "0.0.0" if the app isn't installed or version can't be read.
 # ---------------------------------------------------------------------------
 function Get-InstalledVersion {
     $PackageJson = 'C:\Program Files\Bracer Chat\resources\app.asar'
     if (-not (Test-Path $PackageJson)) { return '0.0.0' }
-    # app.asar is an archive but package.json is at the start — read first 4KB
+    # app.asar is an archive but package.json is at the start - read first 4KB
     try {
         $Bytes = [System.IO.File]::ReadAllBytes($PackageJson)
         $Text  = [System.Text.Encoding]::UTF8.GetString($Bytes)
@@ -257,7 +268,12 @@ function Download-VerifiedAsar {
         # Download the SHA-256 hash file first
         try {
             $HashResponse = Invoke-WebRequest -Uri $HashUrl -Headers @{ Authorization = $AuthHeader } -UseBasicParsing -ErrorAction Stop
-            $ExpectedHash = $HashResponse.Content.Trim().ToUpper()
+            # .Content may be byte[] (PS 5.1) or string depending on context
+            if ($HashResponse.Content -is [byte[]]) {
+                $ExpectedHash = [System.Text.Encoding]::UTF8.GetString($HashResponse.Content).Trim().ToUpper()
+            } else {
+                $ExpectedHash = $HashResponse.Content.Trim().ToUpper()
+            }
             Log-Message "Expected SHA-256: $ExpectedHash"
         } catch {
             Log-Message "Hash file download failed: $($_.Exception.Message)" -Level 'WARNING'
@@ -307,14 +323,14 @@ function Invoke-AsarUpdate {
         return
     }
 
-    # Check if update is needed — skip if already at server version
+    # Check if update is needed - skip if already at server version
     $InstalledVersion = Get-InstalledVersion
     $ServerVersion    = Get-ServerVersion -AuthHeader $AuthHeader
     if ($null -ne $ServerVersion -and $InstalledVersion -eq $ServerVersion) {
-        Log-Message "Already at v$InstalledVersion — no update needed. Exiting."
+        Log-Message ("Already at v" + $InstalledVersion + " - no update needed. Exiting.")
         return
     }
-    Log-Message "Version check: installed v$InstalledVersion, server v$ServerVersion. Updating..."
+    Log-Message ("Version check: installed v" + $InstalledVersion + ", server v" + $ServerVersion + ". Updating...")
 
     # Download and verify the asar (retries up to $MaxRetries on hash mismatch)
     $TempAsar = Join-Path $env:TEMP 'BracerChatUpdate.asar'
@@ -348,7 +364,7 @@ function Invoke-AsarUpdate {
         throw "Failed to replace app.asar after 10 attempts."
     }
 
-    Log-Message "app.asar replaced successfully (v$InstalledVersion -> v$ServerVersion)."
+    Log-Message ("app.asar replaced successfully (v" + $InstalledVersion + " -> v" + $ServerVersion + ").")
 
     # Grant BUILTIN\Users modify rights on ProgramData\BracerChat so the app
     # can write window-prefs.json, update logs, etc. without elevation.
@@ -361,7 +377,7 @@ function Invoke-AsarUpdate {
         Log-Message "icacls on data dir failed (non-fatal): $($_.Exception.Message)" -Level 'WARNING'
     }
 
-    # Fix MediaCache ACLs — early installs may have created this dir with Users:(R) only.
+    # Fix MediaCache ACLs - early installs may have created this dir with Users:(R) only.
     $CacheDir = 'C:\ProgramData\BracerChat\MediaCache'
     if (Test-Path $CacheDir) {
         try {
@@ -387,22 +403,22 @@ if ($null -eq $Global:DefaultLogFile) {
 Log-Message "=== Bracer Chat Update Script started (ASAR with full-install fallback) ==="
 
 # ---------------------------------------------------------------------------
-# Duplicate execution guard — skip if another instance ran within 5 minutes.
+# Duplicate execution guard - skip if another instance ran within 5 minutes.
 # SuperOps queues scripts while assets are offline and fires them all at once
 # on reconnect, which can cause 10+ simultaneous copies of this script.
 # ---------------------------------------------------------------------------
 if ($OverrideCooldown -eq 1) {
-    Log-Message "Cooldown override enabled — skipping duplicate execution check."
+    Log-Message "Cooldown override enabled - skipping duplicate execution check."
 } elseif (Test-Path $LockFile) {
     try {
         $LastRun = [datetime]::Parse((Get-Content $LockFile -Raw).Trim())
         $Elapsed = ((Get-Date) - $LastRun).TotalSeconds
         if ($Elapsed -lt $CooldownSeconds) {
-            Log-Message "Another instance ran $([math]::Round($Elapsed))s ago (cooldown $CooldownSecondss). Exiting."
+            Log-Message ("Another instance ran " + [math]::Round($Elapsed) + "s ago (cooldown " + $CooldownSeconds + "s). Exiting.")
             exit 0
         }
     } catch {
-        # Corrupt lockfile — ignore and proceed
+        # Corrupt lockfile - ignore and proceed
     }
 }
 # Write lockfile immediately so concurrent instances see it
