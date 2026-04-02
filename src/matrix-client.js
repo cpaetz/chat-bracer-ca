@@ -178,6 +178,16 @@ class MatrixClient {
     );
   }
 
+  async sendNotice(roomId, text) {
+    const rid   = encodeURIComponent(roomId);
+    const txnId = this._nextTxnId();
+    await this._request(
+      'PUT',
+      `/_matrix/client/v3/rooms/${rid}/send/m.room.message/${txnId}`,
+      { msgtype: 'm.notice', body: text }
+    );
+  }
+
   /**
    * Upload a file buffer to the media repository.
    * Returns the mxc:// URI.

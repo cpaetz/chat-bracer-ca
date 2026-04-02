@@ -474,7 +474,7 @@ app.on('ready', async () => {
           `Electron: ${process.versions.electron}`,
           `Node:     ${process.versions.node}`,
         ].join('\n');
-        await matrixClient.sendMessage(session.room_id_machine, text);
+        await matrixClient.sendNotice(session.room_id_machine, text);
       })().catch(err => console.error('[BracerChat] !version failed:', err.message));
       return;
     }
@@ -489,7 +489,7 @@ app.on('ready', async () => {
           `Usage:  ${info.cpuUsage}`,
           `Memory: ${info.memory}`,
         ].join('\n');
-        await matrixClient.sendMessage(session.room_id_machine, text);
+        await matrixClient.sendNotice(session.room_id_machine, text);
       })().catch(err => console.error('[BracerChat] !cpu failed:', err.message));
       return;
     }
@@ -515,7 +515,7 @@ app.on('ready', async () => {
         if (!info.disks.length && !info.volumes.length) {
           lines.push('Could not retrieve disk information.');
         }
-        await matrixClient.sendMessage(session.room_id_machine, lines.join('\n'));
+        await matrixClient.sendNotice(session.room_id_machine, lines.join('\n'));
       })().catch(err => console.error('[BracerChat] !disk failed:', err.message));
       return;
     }
@@ -532,7 +532,7 @@ app.on('ready', async () => {
         } else {
           lines.push('No network adapters found.');
         }
-        await matrixClient.sendMessage(session.room_id_machine, lines.join('\n'));
+        await matrixClient.sendNotice(session.room_id_machine, lines.join('\n'));
       })().catch(err => console.error('[BracerChat] !ip failed:', err.message));
       return;
     }
@@ -546,7 +546,7 @@ app.on('ready', async () => {
           `Uptime:      ${info.uptime}`,
           `Last Reboot: ${info.lastReboot}`,
         ].join('\n');
-        await matrixClient.sendMessage(session.room_id_machine, text);
+        await matrixClient.sendNotice(session.room_id_machine, text);
       })().catch(err => console.error('[BracerChat] !uptime failed:', err.message));
       return;
     }
@@ -566,7 +566,7 @@ app.on('ready', async () => {
           '!alwaysontop — Force window on top for 15 min',
           '!help        — This list',
         ].join('\n');
-        await matrixClient.sendMessage(session.room_id_machine, text);
+        await matrixClient.sendNotice(session.room_id_machine, text);
       })().catch(err => console.error('[BracerChat] !help failed:', err.message));
       return;
     }
@@ -651,7 +651,7 @@ async function postMachineInfo() {
     `MAC:      ${mac}`,
     `Version:  ${app.getVersion()}`
   ].join('\n');
-  await matrixClient.sendMessage(session.room_id_machine, text);
+  await matrixClient.sendNotice(session.room_id_machine, text);
 }
 
 // ── Dynamic display name ───────────────────────────────────────────────────

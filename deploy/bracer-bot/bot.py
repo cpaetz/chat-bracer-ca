@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import aiohttp
-from nio import AsyncClient, AsyncClientConfig, JoinedMembersResponse, LoginResponse, RoomMessageText, RoomMessageImage, SyncResponse
+from nio import AsyncClient, AsyncClientConfig, JoinedMembersResponse, LoginResponse, RoomMessageText, RoomMessageImage, RoomMessageNotice, SyncResponse
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -915,17 +915,6 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
     # Record activity for ALL senders (staff, bot, customers) so idle tracking works
     _record_room_activity(room_id)
 
-    # Capture diagnostic responses (from machine account replying to bang commands)
-    if sender != BOT_USER_ID and sender not in STAFF_USERS and _is_diag_response(body):
-        parsed = _parse_machine_info(body)
-        if parsed:
-            _room_machine_info[room_id] = parsed
-            log.info(f"Cached machine info for room={room_id}: user={parsed.get('user')} serial=...{(parsed.get('serial') or '')[-6:]}")
-        if room_id not in _room_diag_text:
-            _room_diag_text[room_id] = []
-        _room_diag_text[room_id].append(body)
-        return  # Don't process diag replies further
-
     # Ignore self
     if sender == BOT_USER_ID:
         return
@@ -1093,6 +1082,28 @@ async def on_image(client: AsyncClient, room, event: RoomMessageImage):
         return
 
 
+async def on_notice(client: AsyncClient, room, event: RoomMessageNotice):
+    """Handle m.notice messages - captures diagnostic responses from Electron app."""
+    if event.server_timestamp < startup_ts:
+        return
+    sender  = event.sender
+    room_id = room.room_id
+    body    = event.body.strip()
+    log     = logging.getLogger("bracer-bot")
+
+    if sender == BOT_USER_ID or sender in STAFF_USERS:
+        return
+
+    if _is_diag_response(body):
+        parsed = _parse_machine_info(body)
+        if parsed:
+            _room_machine_info[room_id] = parsed
+            log.info(f"Cached machine info for room={room_id}: user={parsed.get('user')} serial=...{(parsed.get('serial') or '')[-6:]}")
+        if room_id not in _room_diag_text:
+            _room_diag_text[room_id] = []
+        _room_diag_text[room_id].append(body)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 async def main():
@@ -1130,6 +1141,10 @@ async def main():
     client.add_event_callback(
         lambda room, event: asyncio.ensure_future(on_image(client, room, event)),
         RoomMessageImage,
+    )
+    client.add_event_callback(
+        lambda room, event: asyncio.ensure_future(on_notice(client, room, event)),
+        RoomMessageNotice,
     )
 
     async def on_sync(resp):

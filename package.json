@@ -1,6 +1,6 @@
 {
   "name": "bracer-chat",
-  "version": "1.0.69",
+  "version": "1.0.70",
   "description": "Bracer Systems client support chat",
   "author": "Bracer Systems Inc.",
   "main": "src/main.js",
