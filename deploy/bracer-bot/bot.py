@@ -561,7 +561,9 @@ def _parse_machine_info(body: str) -> dict | None:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-async def _send(client: AsyncClient, room_id: str, text: str):
+async def _send(client: AsyncClient, room_id: str, text: str, delay: float = 1.5):
+    if delay > 0:
+        await asyncio.sleep(delay)
     await client.room_send(
         room_id=room_id,
         message_type="m.room.message",
@@ -784,7 +786,7 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
     _room_diag_text.pop(room_id, None)
     _room_machine_info.pop(room_id, None)
     for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
-        await _send(client, room_id, cmd)
+        await _send(client, room_id, cmd, delay=0)
 
     # Poll for responses - yield to event loop each iteration so sync can process
     for _ in range(10):  # up to 5 seconds (10 x 0.5s)
