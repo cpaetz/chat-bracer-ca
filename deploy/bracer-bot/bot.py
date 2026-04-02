@@ -780,6 +780,13 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
             log.warning(f"Screenshot download failed, creating ticket without it: {exc}")
             screenshot_html = "<p><strong>Screenshot:</strong> Upload failed</p>"
 
+    # Send diagnostic commands and wait for responses
+    _room_diag_text.pop(room_id, None)
+    _room_machine_info.pop(room_id, None)
+    for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
+        await _send(client, room_id, cmd)
+    await asyncio.sleep(3)  # wait for Electron app to respond
+
     # Get cached machine info and full diagnostics
     minfo = _room_machine_info.get(room_id, {})
     logged_user = minfo.get("user", "N/A")
@@ -873,10 +880,6 @@ async def _handle_staff_ticket_trigger(
     client_name = await _get_room_client_displayname(client, room_id)
     name_part = f" {client_name}," if client_name else ""
     set_ticket_session(room_id, "await_issue", staff_triggered=True, initiating_staff=sender)
-    _room_diag_text.pop(room_id, None)
-    _room_machine_info.pop(room_id, None)
-    for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
-        await _send(client, room_id, cmd)
     await _send(client, room_id,
         f"I'll help create a ticket.{name_part} Can you describe the issue?\n(!cancel to stop)")
     log.info(f"Staff-triggered !ticket started room={room_id} staff={sender}")
@@ -1007,10 +1010,6 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                 "If this is urgent please call us at 1-888-272-2371.")
             return
         set_ticket_session(room_id, "await_issue")
-        _room_diag_text.pop(room_id, None)
-        _room_machine_info.pop(room_id, None)
-        for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
-            await _send(client, room_id, cmd)
         await _send(client, room_id, "What's the issue you're experiencing?\n(!cancel to stop)")
         return
 
