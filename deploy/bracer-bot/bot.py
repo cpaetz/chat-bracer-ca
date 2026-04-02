@@ -39,7 +39,7 @@ DB_PATH             = os.environ.get("DB_PATH", "/opt/bracer-bot/bracer_bot.db")
 
 TIMEZONE             = ZoneInfo("America/Edmonton")
 TICKET_TIMEOUT_SECS  = 600   # 10 minutes
-TICKET_RATE_LIMIT    = 3     # max tickets per room per hour
+TICKET_RATE_LIMIT    = 10    # max tickets per room per hour
 INPUT_MAX_LEN        = 2000  # max chars per user input field
 
 SUPEROPS_GQL_URL = "https://api.superops.ai/msp"
