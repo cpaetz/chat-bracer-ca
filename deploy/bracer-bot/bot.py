@@ -785,7 +785,12 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
     _room_machine_info.pop(room_id, None)
     for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
         await _send(client, room_id, cmd)
-    await asyncio.sleep(3)  # wait for Electron app to respond
+
+    # Poll for responses - yield to event loop each iteration so sync can process
+    for _ in range(10):  # up to 5 seconds (10 x 0.5s)
+        await asyncio.sleep(0.5)
+        if len(_room_diag_text.get(room_id, [])) >= 6:
+            break  # all 6 responses received
 
     # Get cached machine info and full diagnostics
     minfo = _room_machine_info.get(room_id, {})
@@ -810,7 +815,8 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
     )
 
     try:
-        internal_id, display_id = await create_superops_ticket(issue, description, priority, account_id)
+        subject = f"New ticket from {logged_user} @ {hostname}" if logged_user != "N/A" else issue
+        internal_id, display_id = await create_superops_ticket(subject, description, priority, account_id)
         log_ticket(room_id)
 
         await _send(client, room_id,
