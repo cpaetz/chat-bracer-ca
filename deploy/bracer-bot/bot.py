@@ -745,7 +745,7 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
         log.warning(f"Could not identify company for room={room_id} host={hostname}")
         await _send(client, room_id,
             "Sorry, I couldn't identify your company to open a ticket. "
-            "Please call us at 1-888-272-2371 or email support@bracersystems.com.")
+            "Please call us at 587-400-9573 or email support@bracersystems.com.")
         return
 
     account_id = None
@@ -758,7 +758,7 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
         log.warning(f"No SuperOps client found for company='{company}' room={room_id}")
         await _send(client, room_id,
             "Sorry, I couldn't match your company in our system. "
-            "Please call us at 1-888-272-2371 or email support@bracersystems.com.")
+            "Please call us at 587-400-9573 or email support@bracersystems.com.")
         return
 
     initiated_note = ""
@@ -831,7 +831,7 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
         log.error(f"Ticket creation failed room={room_id}: {exc}")
         await _send(client, room_id,
             "Sorry, there was an error creating the ticket. "
-            "Please call us at 1-888-272-2371 or email support@bracersystems.com.")
+            "Please call us at 587-400-9573 or email support@bracersystems.com.")
 
 
 async def _handle_ticket_image(client: AsyncClient, room, room_id: str, mxc_url: str, log):
@@ -1013,7 +1013,7 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
         if count_recent_tickets(room_id) >= TICKET_RATE_LIMIT:
             await _send(client, room_id,
                 "You've opened several tickets recently. "
-                "If this is urgent please call us at 1-888-272-2371.")
+                "If this is urgent please call us at 587-400-9573.")
             return
         set_ticket_session(room_id, "await_issue")
         await _send(client, room_id, "What's the issue you're experiencing?\n(!cancel to stop)")
