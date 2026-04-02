@@ -353,8 +353,8 @@ def _should_autorespond(room_id: str) -> bool:
     delay = max(1, config.get("delay_minutes", 20))
     last_ts = _room_last_message.get(room_id)
     if last_ts is None:
-        # No prior message tracked - treat as idle (first message since bot started)
-        return True
+        # No prior message tracked - don't autorespond (avoids false trigger after bot restart)
+        return False
     elapsed_min = (datetime.now(timezone.utc).timestamp() - last_ts) / 60.0
     return elapsed_min >= delay
 
@@ -834,7 +834,7 @@ async def _handle_staff_ticket_trigger(
     name_part = f" {client_name}," if client_name else ""
     set_ticket_session(room_id, "await_issue", staff_triggered=True, initiating_staff=sender)
     await _send(client, room_id,
-        f"I'll help create a ticket.{name_part} Can you describe the issue?")
+        f"I'll help create a ticket.{name_part} Can you describe the issue?\n(!cancel to stop)")
     log.info(f"Staff-triggered !ticket started room={room_id} staff={sender}")
 
 
@@ -896,14 +896,17 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
         if handled:
             return
 
+    # ── Cancel check (before session handling) ───────────────────────────────
+    if body.lower().strip() == "!cancel":
+        _cancel = get_ticket_session(room_id)
+        if _cancel:
+            clear_ticket_session(room_id)
+            await _send(client, room_id, "Ticket cancelled.")
+        return
+
     # ── Active ticket session ──────────────────────────────────────────────────
     session = get_ticket_session(room_id)
     if session:
-        if body.lower().strip() == "!cancel":
-            clear_ticket_session(room_id)
-            await _send(client, room_id, "Ticket cancelled.")
-            return
-
         if session["state"] == "await_issue":
             set_ticket_session(room_id, "await_when", issue=body)
             await _send(client, room_id,
@@ -949,7 +952,7 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                 "If this is urgent please call us at 1-888-272-2371.")
             return
         set_ticket_session(room_id, "await_issue")
-        await _send(client, room_id, "What's the issue you're experiencing?")
+        await _send(client, room_id, "What's the issue you're experiencing?\n(!cancel to stop)")
         return
 
     # ── Greeting (once per room) ───────────────────────────────────────────────
