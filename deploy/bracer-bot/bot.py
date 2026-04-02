@@ -7,7 +7,8 @@ Python + matrix-nio (async), systemd service on chat-bracer-ca.
 
 Behaviour:
   - Greets on first client message per room (business-hours-aware)
-  - !ticket → SuperOps ticket flow (5 questions + priority, 10-min timeout)
+  - !ticket → SuperOps ticket flow (3 questions + screenshot, 10-min timeout)
+  - !cancel → cancels active ticket flow (works for both clients and staff)
   - Never responds to staff or itself
   - Only joins rooms created by bracer-register
 """
@@ -15,6 +16,7 @@ Behaviour:
 import asyncio
 import html
 import json
+import base64
 import logging
 import os
 import sqlite3
@@ -138,7 +140,7 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
-    # Restrict DB permissions — no world-read
+    # Restrict DB permissions - no world-read
     try:
         os.chmod(DB_PATH, 0o640)
     except OSError:
@@ -351,7 +353,7 @@ def _should_autorespond(room_id: str) -> bool:
     delay = max(1, config.get("delay_minutes", 20))
     last_ts = _room_last_message.get(room_id)
     if last_ts is None:
-        # No prior message tracked — treat as idle (first message since bot started)
+        # No prior message tracked - treat as idle (first message since bot started)
         return True
     elapsed_min = (datetime.now(timezone.utc).timestamp() - last_ts) / 60.0
     return elapsed_min >= delay
@@ -372,7 +374,6 @@ def _record_room_activity(room_id: str):
 async def _is_bracer_room(room_id: str) -> bool:
     """Verify room was created by @bracer-register before the bot joins."""
     if not SYNAPSE_ADMIN_TOKEN:
-        # No admin token — fall back to joining (safe enough with registration disabled)
         return True
     server = BOT_USER_ID.split(":", 1)[1]
     expected_creator = f"@bracer-register:{server}"
@@ -443,11 +444,9 @@ async def _get_superops_client_id(company_name: str) -> str | None:
 
     clients = (data.get("data") or {}).get("getClientList", {}).get("clients", [])
     name_lower = company_name.lower()
-    # Exact match first
     for client in clients:
         if (client.get("name") or "").lower() == name_lower:
             return client["accountId"]
-    # Partial match: room name is substring of SuperOps name or vice versa
     for client in clients:
         sops_name = (client.get("name") or "").lower()
         if name_lower in sops_name or sops_name in name_lower:
@@ -460,8 +459,8 @@ async def create_superops_ticket(
     description: str,
     priority: str,
     account_id: str | None,
-) -> str:
-    """GraphQL mutation to create a SuperOps ticket. Returns displayId string."""
+) -> tuple[str, str]:
+    """GraphQL mutation to create a SuperOps ticket. Returns (internal_ticketId, displayId) tuple."""
     headers = {
         "authorization": f"Bearer {SUPEROPS_API_KEY}",
         "CustomerSubDomain": SUPEROPS_SUBDOMAIN,
@@ -500,7 +499,9 @@ async def create_superops_ticket(
         raise RuntimeError(f"SuperOps GraphQL errors: {errors}")
 
     ticket = (data.get("data") or {}).get("createTicket") or {}
-    return str(ticket.get("displayId") or ticket.get("ticketId") or "?")
+    internal_id = str(ticket.get("ticketId") or "?")
+    display_id = str(ticket.get("displayId") or internal_id)
+    return internal_id, display_id
 
 
 async def _download_matrix_media(mxc_url: str) -> tuple[bytes, str]:
@@ -513,8 +514,6 @@ async def _download_matrix_media(mxc_url: str) -> tuple[bytes, str]:
     media_id = parts[1]
     headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
 
-    # Try authenticated client v1 endpoint first (Synapse v1.149+),
-    # fall back to unauthenticated media v3 endpoint
     urls = [
         f"{MATRIX_HOMESERVER}/_matrix/client/v1/media/download/{server_name}/{media_id}",
         f"{MATRIX_HOMESERVER}/_matrix/media/v3/download/{server_name}/{media_id}",
@@ -532,88 +531,6 @@ async def _download_matrix_media(mxc_url: str) -> tuple[bytes, str]:
                     return data, filename
 
     raise RuntimeError(f"Media download failed for {mxc_url}: all endpoints returned non-200")
-
-
-async def _upload_to_superops(file_data: bytes, filename: str, ticket_id: str) -> dict | None:
-    """Upload a file to SuperOps and return the upload metadata."""
-    headers = {
-        "authorization": f"Bearer {SUPEROPS_API_KEY}",
-        "CustomerSubDomain": SUPEROPS_SUBDOMAIN,
-    }
-    import io
-    form = aiohttp.FormData()
-    form.add_field("module", "TICKET_CONVERSATION_ATTACHMENT")
-    form.add_field("details", json.dumps({"ticketId": ticket_id}))
-    form.add_field("files", io.BytesIO(file_data), filename=filename,
-                   content_type="image/png")
-
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-        async with session.post(SUPEROPS_UPLOAD_URL, headers=headers, data=form) as resp:
-            resp_text = await resp.text()
-            log = logging.getLogger("bracer-bot")
-            log.info(f"SuperOps upload response: status={resp.status} body={resp_text[:300]}")
-            if resp.status != 200:
-                return None
-            try:
-                result = json.loads(resp_text)
-            except json.JSONDecodeError:
-                return None
-    uploads = (result or {}).get("data", [])
-    return uploads[0] if uploads else None
-
-
-async def _attach_to_ticket_note(ticket_id: str, upload_meta: dict):
-    """Create a ticket note with the uploaded attachment."""
-    headers = {
-        "authorization": f"Bearer {SUPEROPS_API_KEY}",
-        "CustomerSubDomain": SUPEROPS_SUBDOMAIN,
-        "Content-Type": "application/json",
-    }
-    mutation = """
-    mutation CreateTicketNote($input: CreateTicketNoteInput!) {
-        createTicketNote(input: $input) {
-            noteId
-        }
-    }
-    """
-    variables = {
-        "input": {
-            "ticketId": ticket_id,
-            "content": "Screenshot attached from live chat.",
-            "isPrivate": False,
-            "attachments": [{
-                "fileName": upload_meta["fileName"],
-                "originalFileName": upload_meta["originalFileName"],
-                "fileSize": str(upload_meta["fileSize"]),
-            }],
-        }
-    }
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        async with session.post(
-            SUPEROPS_GQL_URL, headers=headers,
-            json={"query": mutation, "variables": variables},
-        ) as resp:
-            data = await resp.json(content_type=None)
-    errors = data.get("errors")
-    if errors:
-        raise RuntimeError(f"Attach note failed: {errors}")
-
-
-async def _process_screenshot_for_ticket(ticket_id: str, mxc_url: str, log):
-    """Download screenshot from Matrix, upload to SuperOps, attach to ticket."""
-    try:
-        file_data, filename = await _download_matrix_media(mxc_url)
-        upload_meta = await _upload_to_superops(file_data, filename, ticket_id)
-        if upload_meta:
-            await _attach_to_ticket_note(ticket_id, upload_meta)
-            log.info(f"Screenshot attached to ticket {ticket_id}")
-            return True
-        else:
-            log.warning(f"SuperOps upload returned no data for ticket {ticket_id}")
-            return False
-    except Exception as exc:
-        log.error(f"Screenshot attachment failed for ticket {ticket_id}: {exc}")
-        return False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -681,17 +598,14 @@ async def _handle_guest_afterhours(client: AsyncClient, room, room_id: str, body
                 "Please paste or attach your screenshot now using the attachment button.")
             return True
         elif answer in ("no", "n", "nope", "nah"):
-            # Skip screenshot — create ticket immediately
             return await _finalize_guest_ticket(client, room_id, log)
         else:
             await _send(client, room_id, "Please reply yes or no.")
             return True
 
     if state == "await_screenshot":
-        # Allow skipping
         if body.lower().strip() in ("skip", "no", "none"):
             return await _finalize_guest_ticket(client, room_id, log)
-        # If they send text instead of an image, remind them
         await _send(client, room_id,
             "I'm waiting for a screenshot image. Please paste or attach it, "
             "or type 'skip' to create the ticket without one.")
@@ -712,14 +626,27 @@ async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screens
     message      = gs.get("message") or "No details provided"
     preference   = gs.get("preference") or "Not specified"
 
-    # Try to match company in SuperOps
     account_id = None
     try:
         account_id = await _get_superops_client_id(company_name)
     except Exception as exc:
         log.warning(f"Guest company lookup failed room={room_id}: {exc}")
 
-    subject = f"After-hours website chat \u2014 {contact_name} ({company_name})"
+    # Build screenshot HTML if provided
+    screenshot_html = ""
+    if screenshot_mxc:
+        try:
+            file_data, filename = await _download_matrix_media(screenshot_mxc)
+            b64 = base64.b64encode(file_data).decode("ascii")
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
+            mime = f"image/{ext}" if ext in ("png", "jpg", "jpeg", "gif", "webp") else "image/png"
+            screenshot_html = f'<p><strong>Screenshot:</strong></p><p><img src="data:{mime};base64,{b64}" style="max-width:600px;" /></p>'
+            log.info(f"Guest screenshot embedded ({len(file_data)} bytes)")
+        except Exception as exc:
+            log.warning(f"Guest screenshot download failed: {exc}")
+            screenshot_html = "<p><strong>Screenshot:</strong> Upload failed</p>"
+
+    subject = f"After-hours website chat - {contact_name} ({company_name})"
     description = (
         f"<p><strong>After-Hours Website Chat Message</strong></p>"
         f"<p><strong>Contact:</strong> {html.escape(contact_name)}</p>"
@@ -727,30 +654,24 @@ async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screens
         f"<p><strong>Phone:</strong> {html.escape(phone)}</p>"
         f"<p><strong>Preferred contact method:</strong> {html.escape(preference)}</p>"
         f"<p><strong>Message:</strong></p><p>{html.escape(message)}</p>"
-        f"<p><strong>Screenshot:</strong> {'Attached' if screenshot_mxc else 'None provided'}</p>"
+        f"{screenshot_html if screenshot_html else '<p><strong>Screenshot:</strong> None provided</p>'}"
         f"<hr><p><em>Submitted via bracer.ca live chat widget (after hours)</em></p>"
     )
 
     try:
-        ticket_id = await create_superops_ticket(
+        internal_id, display_id = await create_superops_ticket(
             subject, description, "Medium", account_id
         )
         log_ticket(room_id)
 
-        # Attach screenshot if provided
-        if screenshot_mxc:
-            attached = await _process_screenshot_for_ticket(ticket_id, screenshot_mxc, log)
-            if not attached:
-                log.warning(f"Screenshot attachment failed for ticket {ticket_id} but ticket was created")
-
         clear_guest_session(room_id)
         await _send(client, room_id,
-            f"I've opened ticket #{ticket_id} for you. "
+            f"I've opened ticket #{display_id} for you. "
             f"Someone from our team will reach out next business morning.\n\n"
             f"If this becomes urgent before then, call 587-400-9573 and select "
             f"the after-hours emergency option.")
         log.info(
-            f"Guest after-hours ticket #{ticket_id} created \u2014 "
+            f"Guest after-hours ticket #{display_id} created - "
             f"room={room_id} contact={contact_name} company={company_name} "
             f"screenshot={'yes' if screenshot_mxc else 'no'}"
         )
@@ -779,21 +700,13 @@ async def _handle_guest_image(client: AsyncClient, room, room_id: str, mxc_url: 
 
 async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, session: dict, log, screenshot_mxc: str = None):
     """Create a SuperOps ticket from the !ticket flow data."""
-    # Retrieve the stored priority from pending_ticket_id field
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT pending_ticket_id FROM ticket_sessions WHERE room_id = ?",
-            (room_id,),
-        ).fetchone()
-    priority_choice = row["pending_ticket_id"] if row else "2"
-    priority = PRIORITY_MAP.get(priority_choice, "Medium")
+    priority = "Medium"
 
     issue    = session["issue"]
     hostname = _hostname_from_room(room)
     company  = get_company(room_id)
     clear_ticket_session(room_id)
 
-    # Company: use cached value, fall back to live lookup
     if not company:
         try:
             company = await _get_company_name(hostname)
@@ -825,33 +738,39 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
     initiated_note = ""
     if session.get("initiating_staff"):
         staff_label = session["initiating_staff"].split(":")[0].lstrip("@").replace(".", " ").title()
-        initiated_note = f"\nInitiated by: Technician {html.escape(staff_label)} (on client's behalf)"
+        initiated_note = f"<br>Initiated by: Technician {html.escape(staff_label)} (on client's behalf)"
+
+    # Build screenshot HTML if provided
+    screenshot_html = ""
+    if screenshot_mxc:
+        try:
+            file_data, filename = await _download_matrix_media(screenshot_mxc)
+            b64 = base64.b64encode(file_data).decode("ascii")
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
+            mime = f"image/{ext}" if ext in ("png", "jpg", "jpeg", "gif", "webp") else "image/png"
+            screenshot_html = f'<p><strong>Screenshot:</strong></p><p><img src="data:{mime};base64,{b64}" style="max-width:600px;" /></p>'
+            log.info(f"Screenshot embedded in ticket description ({len(file_data)} bytes)")
+        except Exception as exc:
+            log.warning(f"Screenshot download failed, creating ticket without it: {exc}")
+            screenshot_html = "<p><strong>Screenshot:</strong> Upload failed</p>"
 
     description = (
-        f"Issue: {html.escape(issue)}\n\n"
-        f"What was tried: {html.escape(session['tried'] or 'N/A')}\n\n"
-        f"How to reproduce: {html.escape(session['reproduce'] or 'N/A')}\n\n"
-        f"When it started / recent changes: {html.escape(session['when_started'] or 'N/A')}\n\n"
-        f"Screenshot: {'Attached' if screenshot_mxc else 'None provided'}\n\n"
-        f"---\nMachine: {html.escape(hostname)}\nCompany: {html.escape(company)}\nRoom: {html.escape(room_id)}"
-        f"{initiated_note}"
+        f"<p><strong>Issue:</strong> {html.escape(issue)}</p>"
+        f"<p><strong>When it started:</strong> {html.escape(session.get('when_started') or 'N/A')}</p>"
+        f"{screenshot_html if screenshot_html else '<p><strong>Screenshot:</strong> None provided</p>'}"
+        f"<hr><p>Machine: {html.escape(hostname)}<br>Company: {html.escape(company)}<br>Room: {html.escape(room_id)}"
+        f"{initiated_note}</p>"
     )
 
     try:
-        ticket_id = await create_superops_ticket(issue, description, priority, account_id)
+        internal_id, display_id = await create_superops_ticket(issue, description, priority, account_id)
         log_ticket(room_id)
 
-        # Attach screenshot if provided
-        if screenshot_mxc:
-            attached = await _process_screenshot_for_ticket(ticket_id, screenshot_mxc, log)
-            if not attached:
-                log.warning(f"Screenshot attachment failed for ticket {ticket_id} but ticket was created")
-
         await _send(client, room_id,
-            f"Done! Ticket #{ticket_id} created. A technician will follow up.\n"
+            f"Done! Ticket #{display_id} created. A technician will follow up.\n"
             "View your ticket: https://bracer.superops.ai/portal")
         log.info(
-            f"Ticket #{ticket_id} created \u2014 "
+            f"Ticket #{display_id} created - "
             f"room={room_id} host={hostname} company={company} "
             f"screenshot={'yes' if screenshot_mxc else 'no'}"
         )
@@ -906,7 +825,7 @@ async def _get_room_client_displayname(client: AsyncClient, room_id: str) -> str
 async def _handle_staff_ticket_trigger(
     client: AsyncClient, room, room_id: str, sender: str, log
 ):
-    """Handle !ticket command from a staff user — start the ticket flow addressing the client."""
+    """Handle !ticket command from a staff user - start the ticket flow addressing the client."""
     if count_recent_tickets(room_id) >= TICKET_RATE_LIMIT:
         await _send(client, room_id,
             "Rate limit reached for this room. Please open a ticket manually in SuperOps.")
@@ -921,7 +840,7 @@ async def _handle_staff_ticket_trigger(
 
 # ── Message handler ────────────────────────────────────────────────────────────
 
-startup_ts: int = 0  # milliseconds — set in main() before sync
+startup_ts: int = 0  # milliseconds - set in main() before sync
 
 
 async def on_message(client: AsyncClient, room, event: RoomMessageText):
@@ -945,10 +864,16 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
     if sender == BOT_USER_ID:
         return
 
-    # Staff: can trigger !ticket or advance a staff-triggered session
+    # Staff: can trigger !ticket, !cancel, or advance a staff-triggered session
     if sender in STAFF_USERS:
         if body.lower() == "!ticket":
             await _handle_staff_ticket_trigger(client, room, room_id, sender, log)
+            return
+        if body.lower().strip() == "!cancel":
+            _cancel_session = get_ticket_session(room_id)
+            if _cancel_session:
+                clear_ticket_session(room_id)
+                await _send(client, room_id, "Ticket cancelled.")
             return
         _st_session = get_ticket_session(room_id)
         if not (_st_session and _st_session.get("staff_triggered")):
@@ -974,65 +899,29 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
     # ── Active ticket session ──────────────────────────────────────────────────
     session = get_ticket_session(room_id)
     if session:
+        if body.lower().strip() == "!cancel":
+            clear_ticket_session(room_id)
+            await _send(client, room_id, "Ticket cancelled.")
+            return
+
         if session["state"] == "await_issue":
-            set_ticket_session(room_id, "await_tried", issue=body)
+            set_ticket_session(room_id, "await_when", issue=body)
             await _send(client, room_id,
-                "What have you already tried to fix it?")
-            return
-
-        if session["state"] == "await_tried":
-            set_ticket_session(room_id, "await_reproduce",
-                issue=session["issue"], tried=body)
-            await _send(client, room_id,
-                "How would we reproduce this? Step by step if possible.")
-            return
-
-        if session["state"] == "await_reproduce":
-            set_ticket_session(room_id, "await_when",
-                issue=session["issue"], tried=session["tried"], reproduce=body)
-            await _send(client, room_id,
-                "When did the issue start? Did anything change that day? "
-                "New device, new USB drive, change to your dock, did you move your station? "
-                "Anything you can think of that has changed since this started?")
+                "When did this start?")
             return
 
         if session["state"] == "await_when":
-            set_ticket_session(room_id, "await_priority",
-                issue=session["issue"], tried=session["tried"],
-                reproduce=session["reproduce"], when_started=body)
-            await _send(client, room_id,
-                "Last question — how urgent is this?\n1 = Low\n2 = Normal\n3 = High")
-            return
-
-        if session["state"] == "await_priority":
-            if body not in ("1", "2", "3"):
-                set_ticket_session(room_id, "await_priority",
-                    issue=session["issue"], tried=session["tried"],
-                    reproduce=session["reproduce"], when_started=session["when_started"])
-                await _send(client, room_id,
-                    "Please reply with 1 (Low), 2 (Normal), or 3 (High).")
-                return
-
             set_ticket_session(room_id, "await_ticket_screenshot_yn",
-                issue=session["issue"], tried=session["tried"],
-                reproduce=session["reproduce"], when_started=session["when_started"])
-            # Store priority in the when_started field temporarily (it's already saved)
-            # Actually, store it via a DB update
-            with _db() as conn:
-                conn.execute(
-                    "UPDATE ticket_sessions SET pending_ticket_id = ? WHERE room_id = ?",
-                    (body, room_id),  # storing priority choice temporarily in pending_ticket_id
-                )
+                issue=session["issue"], when_started=body)
             await _send(client, room_id,
-                "Do you have a screenshot of the issue? (yes/no)")
+                "Can you send a screenshot of the issue? (yes/no)")
             return
 
         if session["state"] == "await_ticket_screenshot_yn":
             answer = body.lower().strip()
             if answer in ("yes", "y", "yeah", "yep", "sure"):
                 set_ticket_session(room_id, "await_ticket_screenshot",
-                    issue=session["issue"], tried=session["tried"],
-                    reproduce=session["reproduce"], when_started=session["when_started"])
+                    issue=session["issue"], when_started=session["when_started"])
                 await _send(client, room_id,
                     "Please paste or attach your screenshot now.")
                 return
@@ -1066,13 +955,12 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
     # ── Greeting (once per room) ───────────────────────────────────────────────
     if not has_greeted(room_id):
         if is_guest:
-            # Guest from website widget
             mark_greeted(room_id, None)
             if is_business_hours():
                 log.info(f"Guest greeted (business hours) room={room_id}")
                 await _send(client, room_id, GUEST_GREETING_BUSINESS)
             else:
-                log.info(f"Guest greeted (after hours) room={room_id} — starting contact flow")
+                log.info(f"Guest greeted (after hours) room={room_id} - starting contact flow")
                 set_guest_session(room_id, "await_name")
                 if is_holiday_mode():
                     holiday_msg = get_holiday_message()
@@ -1087,7 +975,6 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                     greeting = GUEST_GREETING_AFTERHOURS
                 await _send(client, room_id, greeting)
         else:
-            # Machine client
             hostname = _hostname_from_room(room)
             company  = None
             try:
@@ -1101,7 +988,7 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
 
 
 async def on_image(client: AsyncClient, room, event: RoomMessageImage):
-    """Handle image messages — used for screenshot capture during ticket flows."""
+    """Handle image messages - used for screenshot capture during ticket flows."""
     if event.server_timestamp < startup_ts:
         return
 
@@ -1109,10 +996,8 @@ async def on_image(client: AsyncClient, room, event: RoomMessageImage):
     room_id = room.room_id
     log     = logging.getLogger("bracer-bot")
 
-    # Record activity for idle tracking (all senders)
     _record_room_activity(room_id)
 
-    # Ignore self
     if sender == BOT_USER_ID:
         return
 
@@ -1129,13 +1014,11 @@ async def on_image(client: AsyncClient, room, event: RoomMessageImage):
 
     is_guest = _is_guest_sender(sender)
 
-    # Check guest after-hours flow first
     if is_guest:
         handled = await _handle_guest_image(client, room, room_id, mxc_url, log)
         if handled:
             return
 
-    # Check machine !ticket flow
     handled = await _handle_ticket_image(client, room, room_id, mxc_url, log)
     if handled:
         return
@@ -1149,7 +1032,7 @@ async def main():
 
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
     log = logging.getLogger("bracer-bot")
 
@@ -1183,7 +1066,7 @@ async def main():
     async def on_sync(resp):
         for room_id in list(client.invited_rooms.keys()):
             if not await _is_bracer_room(room_id):
-                log.warning(f"Rejecting invite to {room_id} — not a bracer-register room")
+                log.warning(f"Rejecting invite to {room_id} - not a bracer-register room")
                 await client.room_leave(room_id)
                 continue
             log.info(f"Auto-joining invited room: {room_id}")
@@ -1191,7 +1074,7 @@ async def main():
 
     client.add_response_callback(on_sync, SyncResponse)
 
-    log.info("Sync loop starting…")
+    log.info("Sync loop starting...")
     try:
         await client.sync_forever(timeout=30_000, full_state=True)
     finally:
