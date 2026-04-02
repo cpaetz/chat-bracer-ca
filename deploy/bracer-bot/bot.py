@@ -990,7 +990,7 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                 set_ticket_session(room_id, "await_ticket_screenshot",
                     issue=session["issue"], when_started=session["when_started"])
                 await _send(client, room_id,
-                    "Please paste or attach your screenshot now.")
+                    "Please paste or attach your screenshot now using the screenshot button below.")
                 return
             elif answer in ("no", "n", "nope", "nah"):
                 return await _finalize_machine_ticket(
