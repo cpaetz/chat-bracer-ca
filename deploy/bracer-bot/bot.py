@@ -50,6 +50,10 @@ AUTORESPONDER_CONFIG_PATH = "/opt/bracer-register/autoresponder.json"
 # In-memory: tracks the timestamp of the last message in each room (any sender)
 _room_last_message: dict[str, float] = {}  # room_id -> epoch seconds
 
+# In-memory: caches machine info responses per room (populated by !machineinfo reply)
+_room_machine_info: dict[str, dict] = {}  # room_id -> {"user": ..., "serial": ..., "ip": ..., "mac": ...}
+_room_diag_text: dict[str, list] = {}  # room_id -> list of raw diag response strings
+
 GREETING_BUSINESS = (
     "Hi! Thanks for reaching out to Bracer Systems Support. "
     "A technician will be with you as soon as possible. "
@@ -533,6 +537,28 @@ async def _download_matrix_media(mxc_url: str) -> tuple[bytes, str]:
     raise RuntimeError(f"Media download failed for {mxc_url}: all endpoints returned non-200")
 
 
+# Known diagnostic response headers from the Electron app
+_DIAG_HEADERS = {"**Machine Info**", "**Version Info**", "**CPU / RAM**", "**Disk Info**", "**Network Interfaces**", "**Uptime**"}
+
+
+def _is_diag_response(body: str) -> bool:
+    """Check if a message is a diagnostic command response."""
+    return any(h in body for h in _DIAG_HEADERS)
+
+
+def _parse_machine_info(body: str) -> dict | None:
+    """Parse a !machineinfo response into a dict."""
+    if "**Machine Info**" not in body:
+        return None
+    info = {}
+    for line in body.splitlines():
+        line = line.strip()
+        for key in ("Hostname:", "User:", "Serial:", "IP:", "MAC:", "Version:"):
+            if line.startswith(key):
+                info[key.rstrip(":").lower()] = line[len(key):].strip()
+    return info if info else None
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _send(client: AsyncClient, room_id: str, text: str):
@@ -754,12 +780,26 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
             log.warning(f"Screenshot download failed, creating ticket without it: {exc}")
             screenshot_html = "<p><strong>Screenshot:</strong> Upload failed</p>"
 
+    # Get cached machine info and full diagnostics
+    minfo = _room_machine_info.get(room_id, {})
+    logged_user = minfo.get("user", "N/A")
+    serial = minfo.get("serial", "N/A")
+    diag_texts = _room_diag_text.pop(room_id, [])
+    _room_machine_info.pop(room_id, None)
+
+    # Build diagnostics HTML block
+    diag_html = ""
+    if diag_texts:
+        diag_lines = "<br>".join(html.escape(line) for block in diag_texts for line in block.splitlines() if line.strip())
+        diag_html = f'<details><summary><strong>System Diagnostics</strong></summary><p style="font-family:monospace;font-size:12px;">{diag_lines}</p></details>'
+
     description = (
         f"<p><strong>Issue:</strong> {html.escape(issue)}</p>"
         f"<p><strong>When it started:</strong> {html.escape(session.get('when_started') or 'N/A')}</p>"
         f"{screenshot_html if screenshot_html else '<p><strong>Screenshot:</strong> None provided</p>'}"
-        f"<hr><p>Machine: {html.escape(hostname)}<br>Company: {html.escape(company)}<br>Room: {html.escape(room_id)}"
+        f"<hr><p>Machine: {html.escape(hostname)}<br>Logged-in user: {html.escape(logged_user)}<br>Serial: {html.escape(serial)}<br>Company: {html.escape(company)}<br>Room: {html.escape(room_id)}"
         f"{initiated_note}</p>"
+        f"{diag_html}"
     )
 
     try:
@@ -833,6 +873,10 @@ async def _handle_staff_ticket_trigger(
     client_name = await _get_room_client_displayname(client, room_id)
     name_part = f" {client_name}," if client_name else ""
     set_ticket_session(room_id, "await_issue", staff_triggered=True, initiating_staff=sender)
+    _room_diag_text.pop(room_id, None)
+    _room_machine_info.pop(room_id, None)
+    for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
+        await _send(client, room_id, cmd)
     await _send(client, room_id,
         f"I'll help create a ticket.{name_part} Can you describe the issue?\n(!cancel to stop)")
     log.info(f"Staff-triggered !ticket started room={room_id} staff={sender}")
@@ -859,6 +903,17 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
 
     # Record activity for ALL senders (staff, bot, customers) so idle tracking works
     _record_room_activity(room_id)
+
+    # Capture diagnostic responses (from machine account replying to bang commands)
+    if sender != BOT_USER_ID and sender not in STAFF_USERS and _is_diag_response(body):
+        parsed = _parse_machine_info(body)
+        if parsed:
+            _room_machine_info[room_id] = parsed
+            log.info(f"Cached machine info for room={room_id}: user={parsed.get('user')} serial=...{(parsed.get('serial') or '')[-6:]}")
+        if room_id not in _room_diag_text:
+            _room_diag_text[room_id] = []
+        _room_diag_text[room_id].append(body)
+        return  # Don't process diag replies further
 
     # Ignore self
     if sender == BOT_USER_ID:
@@ -952,6 +1007,10 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                 "If this is urgent please call us at 1-888-272-2371.")
             return
         set_ticket_session(room_id, "await_issue")
+        _room_diag_text.pop(room_id, None)
+        _room_machine_info.pop(room_id, None)
+        for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
+            await _send(client, room_id, cmd)
         await _send(client, room_id, "What's the issue you're experiencing?\n(!cancel to stop)")
         return
 
