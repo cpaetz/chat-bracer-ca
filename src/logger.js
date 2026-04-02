@@ -95,7 +95,7 @@ function setupLogging() {
   });
 
   // Write a start marker so we can see when the app launched
-  writeLine('INFO', [`=== Bracer Chat v${require('../package.json').version} started ===`]);
+  writeLine('INFO', [`=== Bracer Chat v${require('electron').app.getVersion()} started ===`]);
 }
 
 module.exports = { setupLogging, writeLine };
