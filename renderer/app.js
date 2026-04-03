@@ -248,14 +248,32 @@ function yieldToEventLoop() {
   return new Promise(r => setTimeout(r, 0));
 }
 
-/** Check if an RC message has an image attachment. */
-function hasImage(message) {
-  return message.attachments?.some(a => a.image_url || (a.image_type && a.image_type.startsWith('image/')));
+/** Check if an RC message has a quote attachment (reply via web UI). */
+function hasQuoteAttachment(message) {
+  return message.attachments?.some(a => a.message_link);
 }
 
-/** Check if an RC message has a file attachment. */
+/** Get the quote attachment from an RC message. */
+function getQuoteAttachment(message) {
+  return message.attachments?.find(a => a.message_link);
+}
+
+/**
+ * Strip RC's invisible quote link from msg text.
+ * RC prepends "[ ](https://chat.bracer.ca/...?msg=xxx) " to quoted messages.
+ */
+function stripQuoteLink(text) {
+  return text.replace(/^\[\s*\]\([^)]+\)\s*/, '');
+}
+
+/** Check if an RC message has an image attachment (excludes quote attachments). */
+function hasImage(message) {
+  return message.attachments?.some(a => !a.message_link && (a.image_url || (a.image_type && a.image_type.startsWith('image/'))));
+}
+
+/** Check if an RC message has a file attachment (excludes quote attachments). */
 function hasFile(message) {
-  return message.file || message.attachments?.some(a => a.title_link);
+  return message.file || message.attachments?.some(a => !a.message_link && a.title_link);
 }
 
 /** Get the file URL from an RC message's attachment. */
@@ -467,7 +485,51 @@ function renderMessage(message, prepend = false) {
   const isFile  = hasFile(message) && !isImage;
   const fileUrl = getFileUrl(message);
 
-  if (message.tmid && msgText) {
+  // RC quote link pattern: "[ ](https://chat.bracer.ca/.../room?msg=MSGID)" at start of msg
+  const quoteLinkMatch = msgText.match(/^\[\s*\]\(https?:\/\/[^)]*[?&]msg=([a-zA-Z0-9]+)[^)]*\)/);
+
+  if (quoteLinkMatch || hasQuoteAttachment(message)) {
+    // Quote — either inline link in msg text or attachment with message_link
+    const quotedMsgId = quoteLinkMatch
+      ? quoteLinkMatch[1]
+      : getQuoteAttachment(message)?.message_link?.match(/msg=([a-zA-Z0-9]+)/)?.[1];
+
+    const quoteEl = document.createElement('div');
+    quoteEl.className = 'reply-quote';
+
+    if (quotedMsgId) {
+      quoteEl.dataset.replyTo = quotedMsgId;
+      quoteEl.title           = 'Click to jump to original message';
+      quoteEl.style.cursor    = 'pointer';
+      quoteEl.addEventListener('click', () => scrollToMessage(quotedMsgId));
+      quoteEl.textContent = '...';
+      enrichQuoteBlock(quoteEl, quotedMsgId);
+    }
+
+    // If quote attachment has text, use it as fallback
+    if (!quotedMsgId && hasQuoteAttachment(message)) {
+      const qa = getQuoteAttachment(message);
+      if (qa.author_name) {
+        const senderSpan = document.createElement('span');
+        senderSpan.className   = 'reply-quote-sender';
+        senderSpan.textContent = qa.author_name;
+        quoteEl.appendChild(senderSpan);
+      }
+      const quoteText = qa.text || qa.description || '[attachment]';
+      const textSpan   = document.createElement('span');
+      textSpan.className   = 'reply-quote-text';
+      textSpan.textContent = quoteText.length > 120 ? quoteText.slice(0, 120) + '...' : quoteText;
+      quoteEl.appendChild(textSpan);
+    }
+
+    bodyEl.appendChild(quoteEl);
+
+    // The actual reply text (strip the invisible quote link RC prepends)
+    const replyText = stripQuoteLink(msgText);
+    if (replyText) {
+      linkify(bodyEl, replyText);
+    }
+  } else if (message.tmid && msgText) {
     // Reply message — has thread parent (tmid)
     const quoteEl = document.createElement('div');
     quoteEl.className       = 'reply-quote';

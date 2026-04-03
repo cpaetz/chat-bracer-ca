@@ -137,6 +137,28 @@ async def _rc_get_user(client: httpx.AsyncClient, username: str) -> dict | None:
     return None
 
 
+async def _rc_find_machine_user(client: httpx.AsyncClient, hostname: str) -> dict | None:
+    """Find a machine user by hostname. Handles both old (hostname) and new
+    (hostname.user) username formats. Returns user dict or None."""
+    # Try exact hostname first (old format)
+    user = await _rc_get_user(client, hostname)
+    if user:
+        return user
+    # Search for hostname.* pattern (new format)
+    resp = await client.get(
+        f"{RC_URL}/api/v1/users.list",
+        headers=_rc_admin_headers(),
+        params={"count": 10, "query": hostname},
+    )
+    if resp.status_code == 200 and resp.json().get("success"):
+        for u in resp.json().get("users", []):
+            uname = u.get("username", "")
+            # Match hostname_something or hostname.something (legacy)
+            if uname == hostname or uname.startswith(f"{hostname}_") or uname.startswith(f"{hostname}."):
+                return u
+    return None
+
+
 async def _rc_create_user(
     client: httpx.AsyncClient,
     username: str,
@@ -336,13 +358,28 @@ class RegisterRequest(BaseModel):
         return v
 
 
+def _strip_domain(logged_in_user: str) -> str:
+    """Strip DOMAIN\\ prefix if present (e.g. 'BRACER\\chris.paetz' -> 'chris.paetz')."""
+    return logged_in_user.split("\\")[-1] if "\\" in logged_in_user else logged_in_user
+
+
 def _build_display_name(hostname: str, logged_in_user: str = "") -> str:
     """Build RC display name: 'HOSTNAME (user)' or just 'HOSTNAME'."""
     if logged_in_user:
-        # Strip DOMAIN\ prefix if present (e.g. "BRACER\chris.paetz" -> "chris.paetz")
-        user = logged_in_user.split("\\")[-1] if "\\" in logged_in_user else logged_in_user
+        user = _strip_domain(logged_in_user)
         return f"{hostname.upper()} ({user})"
     return hostname.upper()
+
+
+def _build_username(hostname: str, logged_in_user: str = "") -> str:
+    """Build RC username: 'hostname_user' or just 'hostname'.
+    RC usernames must be lowercase, no spaces, no parens.
+    Underscore separates hostname from user since hostnames use hyphens
+    and Windows usernames may contain dots."""
+    if logged_in_user:
+        user = _strip_domain(logged_in_user).lower()
+        return f"{hostname.lower()}_{user}"
+    return hostname.lower()
 
 
 ALLOWED_ORIGINS = {"https://bracer.ca", "https://www.bracer.ca"}
@@ -463,22 +500,23 @@ async def register(
     company_slug = slugify(company)
     elevated = body.elevated
     display_name = _build_display_name(hostname, body.logged_in_user)
+    new_username = _build_username(hostname, body.logged_in_user)
 
-    logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} display={display_name} ip={request.client.host}")
+    logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} display={display_name} username={new_username} ip={request.client.host}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # 1. Create or update RC user
         password = generate_password()
-        existing = await _rc_get_user(client, hostname)
+        existing = await _rc_find_machine_user(client, hostname)
         if existing:
-            rc_user = await _rc_update_user(client, existing["_id"], password=password, active=True, name=display_name)
+            rc_user = await _rc_update_user(client, existing["_id"], password=password, active=True, name=display_name, username=new_username)
         else:
-            rc_user = await _rc_create_user(client, hostname, password, name=display_name)
+            rc_user = await _rc_create_user(client, new_username, password, name=display_name)
 
         rc_user_id = rc_user["_id"]
 
         # 2. Log in as the new user to get auth token
-        login = await _rc_login(client, hostname, password)
+        login = await _rc_login(client, new_username, password)
         auth_token = login["authToken"]
 
         # 3. Get or create broadcast channel and invite user
@@ -507,7 +545,7 @@ async def register(
 
     return {
         "user_id": rc_user_id,
-        "username": hostname,
+        "username": new_username,
         "auth_token": auth_token,
         "elevated": elevated,
         "rooms": {
@@ -727,20 +765,21 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
     company_slug = slugify(company)
 
     display_name = _build_display_name(hostname, logged_in_user)
+    new_username = _build_username(hostname, logged_in_user)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Create or update user
         password = generate_password()
-        existing = await _rc_get_user(client, hostname)
+        existing = await _rc_find_machine_user(client, hostname)
         if existing:
-            await _rc_update_user(client, existing["_id"], password=password, active=True, name=display_name)
+            await _rc_update_user(client, existing["_id"], password=password, active=True, name=display_name, username=new_username)
             rc_user_id = existing["_id"]
         else:
-            rc_user = await _rc_create_user(client, hostname, password, name=display_name)
+            rc_user = await _rc_create_user(client, new_username, password, name=display_name)
             rc_user_id = rc_user["_id"]
 
         # Login
-        login_data = await _rc_login(client, hostname, password)
+        login_data = await _rc_login(client, new_username, password)
         auth_token = login_data["authToken"]
 
         # Broadcast channel
@@ -760,10 +799,10 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
     # Invalidate token after successful claim (single-use)
     _consume_installer_token(token)
 
-    logger.info(f"Installer claim complete: {hostname}")
+    logger.info(f"Installer claim complete: {hostname} -> {new_username}")
     return {
         "user_id": rc_user_id,
-        "username": hostname,
+        "username": new_username,
         "auth_token": auth_token,
         "elevated": False,
         "room_id_machine": machine_room_id,
@@ -962,12 +1001,20 @@ async def _validate_machine_token(request: Request, client_ip: str = "unknown"):
         await _track_auth_failure(client_ip)
         return None
     username = resp.json().get("username", "")
-    # Reject staff/bot accounts
-    if "." in username or username in ("bracerbot", "bracer-register"):
+    # Reject staff/bot accounts (staff SSO usernames don't contain hyphens, machine usernames always do)
+    if username in ("bracerbot", "bracer-register"):
         return None
-    # Path traversal guard
-    if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", username):
+    if username in STAFF_USERNAMES:
         return None
+    # Path traversal guard — allow hostname chars plus dots for hostname.user format
+    if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9.\-]{0,126}[a-zA-Z0-9])?$", username):
+        return None
+    # Return hostname portion only (strip _windowsuser or .windowsuser suffix)
+    # Machine hostnames never contain underscores or dots
+    if "_" in username:
+        return username.split("_")[0]
+    if "." in username:
+        return username.split(".")[0]
     return username
 
 
@@ -992,7 +1039,8 @@ def _filter_log_lines(content: bytes) -> bytes:
 
 @app.post("/api/machine/displayname")
 async def update_display_name(request: Request):
-    """Update the machine user's RC display name. Called by Electron client on user change.
+    """Update the machine user's RC display name and username.
+    Called by Electron client on startup and user change.
     Requires valid RC auth. Body: {"logged_in_user": "chris.paetz"}"""
     hostname = await _validate_machine_token(request, request.client.host)
     if not hostname:
@@ -1003,13 +1051,14 @@ async def update_display_name(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     display_name = _build_display_name(hostname, logged_in_user)
+    new_username = _build_username(hostname, logged_in_user)
     async with httpx.AsyncClient(timeout=10.0) as client:
-        existing = await _rc_get_user(client, hostname)
+        existing = await _rc_find_machine_user(client, hostname)
         if not existing:
             raise HTTPException(status_code=404, detail="Machine not registered")
-        await _rc_update_user(client, existing["_id"], name=display_name)
-    logger.info(f"Display name updated: {hostname} -> {display_name}")
-    return {"ok": True, "display_name": display_name}
+        await _rc_update_user(client, existing["_id"], name=display_name, username=new_username)
+    logger.info(f"Display name/username updated: {hostname} -> {new_username} ({display_name})")
+    return {"ok": True, "display_name": display_name, "username": new_username}
 
 
 @app.get("/api/update/check")
@@ -1070,26 +1119,27 @@ async def machine_reauth(body: ReauthRequest, request: Request):
     hostname = body.hostname
     serial = body.serial
     display_name = _build_display_name(hostname, body.logged_in_user)
+    new_username = _build_username(hostname, body.logged_in_user)
 
-    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} display={display_name} ip={request.client.host}")
+    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} display={display_name} username={new_username} ip={request.client.host}")
 
-    # Verify this is a machine account (no dots, not staff/bot)
-    if "." in hostname or hostname in ("bracerbot", "bracer-register"):
+    # Verify this is a machine account (not staff/bot)
+    if hostname.lower() in ("bracerbot", "bracer-register"):
         raise HTTPException(status_code=403, detail="Not a machine account")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Verify the RC user exists
-        existing = await _rc_get_user(client, hostname)
+        # Verify the RC user exists (handles both old and new username formats)
+        existing = await _rc_find_machine_user(client, hostname)
         if not existing:
             logger.warning(f"Reauth failed: user {hostname} not found")
             raise HTTPException(status_code=404, detail="Machine not registered")
 
         rc_user_id = existing["_id"]
 
-        # Reset password, update display name, and log in
+        # Reset password, update display name + username, and log in
         new_password = generate_password()
-        await _rc_update_user(client, rc_user_id, password=new_password, name=display_name)
-        login_data = await _rc_login(client, hostname, new_password)
+        await _rc_update_user(client, rc_user_id, password=new_password, name=display_name, username=new_username)
+        login_data = await _rc_login(client, new_username, new_password)
         auth_token = login_data["authToken"]
 
         # Look up rooms via admin API (reliable, no subscription propagation delay)
@@ -1139,17 +1189,17 @@ async def machine_reauth(body: ReauthRequest, request: Request):
                             )
                             if mem_resp.status_code == 200:
                                 members = [m.get("username") for m in mem_resp.json().get("members", [])]
-                                if hostname in members:
+                                if any(m == hostname or m.startswith(f"{hostname}_") or m.startswith(f"{hostname}.") for m in members):
                                     company_room = room["_id"]
                                     break
 
     if not machine_room:
         logger.warning(f"Reauth: could not find machine room for {hostname}")
 
-    logger.info(f"Reauth complete: {hostname} ip={request.client.host}")
+    logger.info(f"Reauth complete: {hostname} -> {new_username} ip={request.client.host}")
     return {
         "user_id": rc_user_id,
-        "username": hostname,
+        "username": new_username,
         "auth_token": auth_token,
         "elevated": False,
         "room_id_machine": machine_room or "",

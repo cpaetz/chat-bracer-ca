@@ -7,8 +7,9 @@
   "scripts": {
     "start": "electron .",
     "icons": "node scripts/generate-icons.js",
-    "build": "npm run icons && node scripts/prep-wincosesign.js && electron-builder --win --config electron-builder.config.js",
-    "build:dir": "npm run icons && node scripts/prep-wincosesign.js && electron-builder --win --dir --config electron-builder.config.js"
+    "prebuild": "node -e \"require('fs').writeFileSync('electron-version.txt', require('electron/package.json').version)\"",
+    "build": "npm run icons && npm run prebuild && node scripts/prep-wincosesign.js && electron-builder --win --config electron-builder.config.js",
+    "build:dir": "npm run icons && npm run prebuild && node scripts/prep-wincosesign.js && electron-builder --win --dir --config electron-builder.config.js"
   },
   "devDependencies": {
     "electron": "^41.1.0",

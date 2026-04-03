@@ -5,6 +5,9 @@ module.exports = {
   productName: 'Bracer Chat',
   copyright: 'Copyright © 2026 Bracer Systems Inc.',
   directories: { output: 'dist' },
+  extraResources: [
+    { from: 'electron-version.txt', to: 'electron-version.txt' }
+  ],
   files: [
     'src/**/*',
     'renderer/**/*',

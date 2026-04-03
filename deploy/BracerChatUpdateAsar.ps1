@@ -12,7 +12,7 @@
     logged-in user's interactive session via a one-shot scheduled task.
 
     If the app is not yet installed, falls back automatically to the full NSIS
-    installer (~83 MB) so this script is safe to run on any machine regardless
+    installer (~106 MB) so this script is safe to run on any machine regardless
     of state.
 
     SuperOps runtime variables required:
@@ -21,11 +21,12 @@
         $OverrideCooldown        - Set to 1 to bypass the 5-minute cooldown guard (default: 0)
 
 .NOTES
-    Version:        2.0
+    Version:        2.1
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-24
-    Updated:        2026-03-30 - Removed in-app self-updater, added version
-                    skip and SHA-256 verification with retry.
+    Updated:        2026-04-03 - Verified compatible with Rocket.Chat migration.
+                    Updated installer size reference (~106 MB). No protocol
+                    changes needed — script is transport-layer only.
 #>
 
 #Requires -Version 5.1
