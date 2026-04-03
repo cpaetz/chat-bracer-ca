@@ -4,6 +4,9 @@
  * app.js — Bracer Chat renderer process.
  * Communicates with main process exclusively via window.bracerChat (context bridge).
  * No Node.js or Electron APIs used directly.
+ *
+ * Rocket.Chat message format:
+ *   { _id, rid, msg, ts (ISO string), u: { _id, username, name }, attachments, tmid, ... }
  */
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -13,8 +16,8 @@ const PINNED_STORAGE_KEY = 'bracerChat_pinnedMessages';
 // ── State ──────────────────────────────────────────────────────────────────
 let sessionInfo  = null;
 let activeRoomId = null;
-let ctxTargetEventId = null; // event_id of the message the context menu opened on
-const renderedBroadcastIds = new Set(); // dedup broadcast events
+let ctxTargetMsgId = null; // _id of the message the context menu opened on
+const renderedBroadcastIds = new Set();
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const elRoomName    = document.getElementById('room-name');
@@ -51,21 +54,20 @@ const elEmojiRecentSec   = document.getElementById('emoji-recent-section');
 
 // ── Reply state ────────────────────────────────────────────────────────────
 
-let replyToEvent = null;
+let replyToMessage = null;
 
-function setReply(event) {
-  replyToEvent = event;
-  const sender  = senderLabel(event.sender);
-  const body    = (event.content && event.content.body) ||
-    (event.content && event.content.msgtype === 'm.image' ? '[image]' : '[attachment]');
-  const preview = body.length > 80 ? body.slice(0, 80) + '…' : body;
+function setReply(message) {
+  replyToMessage = message;
+  const sender  = senderLabel(message);
+  const body    = message.msg || (hasImage(message) ? '[image]' : '[attachment]');
+  const preview = body.length > 80 ? body.slice(0, 80) + '...' : body;
   elReplyBarLabel.textContent = `${sender}: ${preview}`;
   elReplyBar.classList.add('visible');
   elMsgInput.focus();
 }
 
 function clearReply() {
-  replyToEvent = null;
+  replyToMessage = null;
   elReplyBar.classList.remove('visible');
 }
 
@@ -83,91 +85,77 @@ function savePinned(pins) {
   localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(pins));
 }
 
-function isPinned(eventId) {
-  return loadPinned().some(p => p.event_id === eventId);
+function isPinned(msgId) {
+  return loadPinned().some(p => p._id === msgId);
 }
 
-function pinMessage(event) {
+function pinMessageLocal(message) {
   const pins = loadPinned();
-  if (pins.some(p => p.event_id === event.event_id)) return; // already pinned
+  if (pins.some(p => p._id === message._id)) return;
   pins.push({
-    event_id: event.event_id,
-    sender  : event.sender,
-    body    : event.content && event.content.body ? event.content.body : '[attachment]',
-    ts      : event.origin_server_ts,
+    _id     : message._id,
+    sender  : message.u?.username || '',
+    body    : message.msg || '[attachment]',
+    ts      : message.ts,
     pinnedAt: Date.now()
   });
   savePinned(pins);
   renderPinnedPanel();
-  // Highlight the message bubble
-  const bubble = document.querySelector(`[data-event-id="${CSS.escape(event.event_id)}"]`);
+  const bubble = findBubbleById(message._id);
   if (bubble) bubble.classList.add('pinned-highlight');
-  // Push to Matrix so Element sees it (fails silently if insufficient power level)
-  if (activeRoomId) {
-    const pinnedIds = pins.map(p => p.event_id);
-    window.bracerChat.setPinnedEvents(activeRoomId, pinnedIds).catch(() => {});
+  // Push to RC server
+  if (message._id) {
+    window.bracerChat.pinMessage(message._id).catch(() => {});
   }
 }
 
-function unpinMessage(eventId) {
-  const pins = loadPinned().filter(p => p.event_id !== eventId);
+function unpinMessageLocal(msgId) {
+  const pins = loadPinned().filter(p => p._id !== msgId);
   savePinned(pins);
   renderPinnedPanel();
-  const bubble = document.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`);
+  const bubble = findBubbleById(msgId);
   if (bubble) bubble.classList.remove('pinned-highlight');
-  // Push updated list to Matrix
-  if (activeRoomId) {
-    const pinnedIds = pins.map(p => p.event_id);
-    window.bracerChat.setPinnedEvents(activeRoomId, pinnedIds).catch(() => {});
+  if (msgId) {
+    window.bracerChat.unpinMessage(msgId).catch(() => {});
   }
 }
 
-/**
- * Fetch m.room.pinned_events from Matrix and merge into local pin storage.
- * Pins set in Element will appear in Bracer Chat after restart or on first load.
- */
-async function syncPinsFromMatrix(roomId) {
+function findBubbleById(msgId) {
+  for (const el of elMessages.querySelectorAll('[data-msg-id]')) {
+    if (el.dataset.msgId === msgId) return el;
+  }
+  return null;
+}
+
+/** Sync pinned messages from RC server into local storage. */
+async function syncPinsFromServer(roomId) {
   try {
-    const matrixPinIds = await window.bracerChat.getPinnedEvents(roomId);
-    if (!matrixPinIds.length) return;
+    const serverPins = await window.bracerChat.getPinnedEvents(roomId);
+    if (!serverPins || !serverPins.length) return;
     const localPins = loadPinned();
-    const localIds  = new Set(localPins.map(p => p.event_id));
+    const localIds  = new Set(localPins.map(p => p._id));
     let changed = false;
-    for (const id of matrixPinIds) {
-      const existing = localPins.find(p => p.event_id === id);
-      // Fetch if new OR if it was previously saved as a placeholder (no sender/body)
-      const isPlaceholder = existing && (!existing.sender || existing.body === '[pinned]');
-      if (!existing || isPlaceholder) {
-        let sender = '', body = '[pinned]', ts = 0;
-        try {
-          const ev = await window.bracerChat.getRoomEvent(roomId, id);
-          if (ev) {
-            sender = ev.sender || '';
-            ts     = ev.origin_server_ts || 0;
-            const c = ev.content || {};
-            body = c.body || (c.msgtype === 'm.image' ? '[image]' : '[attachment]');
-          }
-        } catch (_) {}
-        if (existing) {
-          // Update the placeholder in place
-          existing.sender = sender;
-          existing.body   = body;
-          existing.ts     = ts;
-        } else {
-          localPins.push({ event_id: id, sender, body, ts, pinnedAt: Date.now() });
-        }
+    for (const msg of serverPins) {
+      if (!localIds.has(msg._id)) {
+        localPins.push({
+          _id     : msg._id,
+          sender  : msg.u?.username || '',
+          body    : msg.msg || '[attachment]',
+          ts      : msg.ts,
+          pinnedAt: Date.now()
+        });
         changed = true;
       }
     }
-    // Remove local pins that were unpinned in Matrix
-    const matrixIdSet = new Set(matrixPinIds);
-    const merged = localPins.filter(p => matrixIdSet.has(p.event_id));
+    // Remove local pins not on server
+    const serverIds = new Set(serverPins.map(m => m._id));
+    const merged = localPins.filter(p => serverIds.has(p._id));
     if (changed || merged.length !== localPins.length) {
       savePinned(merged);
       renderPinnedPanel();
     }
   } catch (err) {
-    console.warn('[pins] syncPinsFromMatrix failed:', err.message);
+    console.warn('[pins] syncPinsFromServer failed:', err.message);
   }
 }
 
@@ -188,43 +176,33 @@ function renderPinnedPanel() {
 
     const sender = document.createElement('span');
     sender.className   = 'pin-sender';
-    sender.textContent = senderLabel(pin.sender);
+    sender.textContent = pin.sender;
 
     const body = document.createElement('span');
     body.className   = 'pin-body';
-    body.textContent = pin.body.length > 80 ? pin.body.slice(0, 80) + '…' : pin.body;
+    body.textContent = pin.body.length > 80 ? pin.body.slice(0, 80) + '...' : pin.body;
 
     const removeBtn = document.createElement('button');
     removeBtn.className   = 'pin-remove';
-    removeBtn.textContent = '×';
+    removeBtn.textContent = '\u00D7';
     removeBtn.title       = 'Unpin';
     removeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      unpinMessage(pin.event_id);
+      unpinMessageLocal(pin._id);
     });
 
     item.appendChild(sender);
     item.appendChild(body);
     item.appendChild(removeBtn);
 
-    // Click item → scroll to that message bubble.
-    // Use dataset iteration instead of CSS querySelector to avoid selector
-    // escaping issues with Matrix event IDs (start with $, may contain colons).
-    // If the message isn't loaded in current history, fetch and render it first.
     item.addEventListener('click', async () => {
-      const findBubble = () => {
-        for (const el of elMessages.querySelectorAll('[data-event-id]')) {
-          if (el.dataset.eventId === pin.event_id) return el;
-        }
-        return null;
-      };
-      let bubble = findBubble();
+      let bubble = findBubbleById(pin._id);
       if (!bubble) {
         try {
-          const ev = await window.bracerChat.getRoomEvent(activeRoomId, pin.event_id);
-          if (ev) {
-            renderMessage(ev);
-            bubble = findBubble();
+          const msg = await window.bracerChat.getRoomEvent(activeRoomId, pin._id);
+          if (msg) {
+            renderMessage(msg);
+            bubble = findBubbleById(pin._id);
           }
         } catch (_) {}
       }
@@ -239,20 +217,14 @@ function renderPinnedPanel() {
 
 const URL_REGEX = /https?:\/\/[^\s<>"']+/g;
 
-/**
- * Populates `el` with text and clickable links parsed from `text`.
- * Safe: builds DOM nodes directly — no innerHTML.
- */
 function linkify(el, text) {
   let last = 0;
   let match;
   URL_REGEX.lastIndex = 0;
   while ((match = URL_REGEX.exec(text)) !== null) {
-    // Text before the URL
     if (match.index > last) {
       el.appendChild(document.createTextNode(text.slice(last, match.index)));
     }
-    // The URL itself
     const url = match[0];
     const a   = document.createElement('a');
     a.textContent = url;
@@ -265,7 +237,6 @@ function linkify(el, text) {
     el.appendChild(a);
     last = match.index + url.length;
   }
-  // Remaining text after last URL
   if (last < text.length) {
     el.appendChild(document.createTextNode(text.slice(last)));
   }
@@ -273,66 +244,84 @@ function linkify(el, text) {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/** Yield to the browser event loop so it can process pending tasks. */
 function yieldToEventLoop() {
   return new Promise(r => setTimeout(r, 0));
+}
+
+/** Check if an RC message has an image attachment. */
+function hasImage(message) {
+  return message.attachments?.some(a => a.image_url || (a.image_type && a.image_type.startsWith('image/')));
+}
+
+/** Check if an RC message has a file attachment. */
+function hasFile(message) {
+  return message.file || message.attachments?.some(a => a.title_link);
+}
+
+/** Get the file URL from an RC message's attachment. */
+function getFileUrl(message) {
+  if (message.attachments?.length > 0) {
+    const att = message.attachments[0];
+    return att.image_url || att.title_link || null;
+  }
+  return null;
+}
+
+/** Get the file name from an RC message. */
+function getFileName(message) {
+  if (message.file) return message.file.name || 'file';
+  if (message.attachments?.length > 0) {
+    return message.attachments[0].title || message.attachments[0].description || 'file';
+  }
+  return 'file';
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   try {
-    // Load pin state early so the button reflects the correct state on first paint
     const pinPrefs = await window.bracerChat.getPinState();
     applyPinButtonState(pinPrefs.pinned);
 
     sessionInfo  = await window.bracerChat.getSessionInfo();
     activeRoomId = sessionInfo.machineRoomId;
 
-    elRoomName.textContent   = `Support — ${sessionInfo.hostname}`;
-    elConnStatus.textContent = 'Loading history…';
+    elRoomName.textContent   = `Support \u2014 ${sessionInfo.hostname}`;
+    elConnStatus.textContent = 'Loading history\u2026';
     console.log('[app] sessionInfo:', JSON.stringify(sessionInfo));
 
-    // Load pins from Matrix state (syncs any pins set in Element)
-    await syncPinsFromMatrix(activeRoomId);
+    await syncPinsFromServer(activeRoomId);
 
     renderPinnedPanel();
     await loadHistory();
 
     elConnStatus.textContent = 'Connected';
 
-    // Start listening for new messages delivered by the sync loop
     window.bracerChat.onNewMessage(handleIncomingMessage);
 
-    // Listen for session updates (e.g. broadcast room ID changes after alias resolution)
     window.bracerChat.onSessionUpdate((update) => {
       console.log('[app] session-update received:', JSON.stringify(update));
       if (update.broadcastRoomId) sessionInfo.broadcastRoomId = update.broadcastRoomId;
       if (update.companyRoomId)   sessionInfo.companyRoomId   = update.companyRoomId;
     });
 
-    // Scroll to bottom whenever the window becomes visible (e.g. opened from tray)
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) scrollToBottom(true);
     });
 
-    // When window is shown due to an incoming message: expand pinned panel
-    // and scroll to the triggering message
-    window.bracerChat.onFocusMessage(({ eventId }) => {
-      // Expand pinned panel if there are any pins
+    window.bracerChat.onFocusMessage(({ messageId }) => {
       const pins = loadPinned();
       if (pins.length > 0) {
         elPinnedPanel.classList.remove('collapsed');
       }
-      // Scroll to the new message bubble (may not be rendered yet — retry briefly)
-      const scrollToEvent = (id, attempts = 0) => {
-        const bubble = document.querySelector(`[data-event-id="${CSS.escape(id)}"]`);
+      const scrollToMsg = (id, attempts = 0) => {
+        const bubble = findBubbleById(id);
         if (bubble) {
           bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
         } else if (attempts < 10) {
-          setTimeout(() => scrollToEvent(id, attempts + 1), 150);
+          setTimeout(() => scrollToMsg(id, attempts + 1), 150);
         }
       };
-      scrollToEvent(eventId);
+      scrollToMsg(messageId);
     });
 
   } catch (err) {
@@ -344,15 +333,46 @@ async function init() {
 
 // ── Message rendering ──────────────────────────────────────────────────────
 
-/** Strip the Matrix fallback quote block (everything before the first \n\n). */
-function extractReplyText(body) {
-  const i = body.indexOf('\n\n');
-  return i !== -1 ? body.slice(i + 2) : body;
+/**
+ * Parse an RC timestamp to ms epoch. Handles:
+ *  - ISO string: "2026-04-03T04:03:30.873Z"
+ *  - EJSON date:  { "$date": 1775189010873 }
+ *  - ms number:   1775189010873
+ */
+function parseTs(ts) {
+  if (!ts) return 0;
+  if (typeof ts === 'number') return ts;
+  if (typeof ts === 'string') return new Date(ts).getTime() || 0;
+  if (ts.$date) return typeof ts.$date === 'number' ? ts.$date : new Date(ts.$date).getTime() || 0;
+  return 0;
 }
 
-/** Scroll to a message by event_id and briefly flash it. */
-function scrollToMessage(eventId) {
-  const el = elMessages.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`);
+function formatTime(ts) {
+  const ms = parseTs(ts);
+  if (!ms) return '';
+  const d = new Date(ms);
+  const date = d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `${date} ${time}`;
+}
+
+/** Get timestamp in ms from an RC message. */
+function getMsgTs(message) {
+  return parseTs(message.ts);
+}
+
+/** Extract a readable display name from an RC message's user object. */
+function senderLabel(message) {
+  if (typeof message === 'string') {
+    // Backward compat: if called with a plain string (username)
+    return message || 'Unknown';
+  }
+  return message.u?.username || message.u?.name || 'Unknown';
+}
+
+/** Scroll to a message by _id and briefly flash it. */
+function scrollToMessage(msgId) {
+  const el = findBubbleById(msgId);
   if (!el) return;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   el.classList.add('message-highlight');
@@ -360,169 +380,145 @@ function scrollToMessage(eventId) {
 }
 
 /**
- * Async: fetch the original event and repopulate the quote block with the
+ * Async: fetch the original message and repopulate the quote block with the
  * sender's name plus the real content (text preview or image thumbnail).
  */
-async function enrichQuoteBlock(quoteEl, eventId) {
-  let event;
+async function enrichQuoteBlock(quoteEl, messageId) {
+  let msg;
   try {
-    event = await window.bracerChat.getRoomEvent(activeRoomId, eventId);
+    msg = await window.bracerChat.getRoomEvent(activeRoomId, messageId);
   } catch (e) { return; }
-  if (!event || !event.content) return;
+  if (!msg) return;
 
-  const c      = event.content;
-  const sender = senderLabel(event.sender || '');
-
-  quoteEl.textContent = '';   // clear the placeholder
+  quoteEl.textContent = '';
 
   const senderEl = document.createElement('span');
   senderEl.className   = 'reply-quote-sender';
-  senderEl.textContent = sender;
+  senderEl.textContent = senderLabel(msg);
   quoteEl.appendChild(senderEl);
 
-  if (c.msgtype === 'm.image' && c.url) {
-    // Show a small thumbnail of the original image
-    const img     = document.createElement('img');
-    img.className = 'reply-quote-img';
-    img.alt       = c.body || 'image';
-    quoteEl.appendChild(img);
-    window.bracerChat.resolveMediaUrl(c.url).then(url => { if (url) img.src = url; });
+  if (hasImage(msg)) {
+    const fileUrl = getFileUrl(msg);
+    if (fileUrl) {
+      const img     = document.createElement('img');
+      img.className = 'reply-quote-img';
+      img.alt       = msg.msg || 'image';
+      quoteEl.appendChild(img);
+      window.bracerChat.resolveMediaUrl(fileUrl).then(url => { if (url) img.src = url; });
+    }
   } else {
-    // Text or file — strip any nested reply fallback and truncate
-    const raw      = c.body || c.filename || '[attachment]';
-    const bodyText = extractReplyText(raw).trim();
+    const bodyText = msg.msg || getFileName(msg) || '[attachment]';
     const textEl   = document.createElement('span');
     textEl.className   = 'reply-quote-text';
-    textEl.textContent = bodyText.length > 120 ? bodyText.slice(0, 120) + '…' : bodyText;
+    textEl.textContent = bodyText.length > 120 ? bodyText.slice(0, 120) + '...' : bodyText;
     quoteEl.appendChild(textEl);
   }
 }
 
-function formatTime(tsMs) {
-  if (!tsMs) return '';
-  return new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-/** Extract a readable display name from a Matrix user ID (@user:server). */
-function senderLabel(userId) {
-  const m = userId && userId.match(/^@([^:]+):/);
-  return m ? m[1] : (userId || 'Unknown');
-}
-
 /**
  * Builds and appends (or prepends) a message bubble.
+ * Accepts an RC message object: { _id, msg, ts, u, attachments, tmid, ... }
  */
-function renderMessage(event, prepend = false) {
-  if (!event || !event.content) return;
+function renderMessage(message, prepend = false) {
+  if (!message) return;
 
-  const isOwn  = sessionInfo && event.sender === sessionInfo.userId;
-  const content = event.content;
+  // Skip system messages (user joined, topic changed, etc.)
+  if (message.t) return;
+
+  const isOwn   = sessionInfo && (message.u?._id === (sessionInfo.userId || sessionInfo.username));
+  const msgText = message.msg || '';
 
   const wrap = document.createElement('div');
-  wrap.className       = `message ${isOwn ? 'own' : 'other'}`;
-  wrap.dataset.eventId = event.event_id || '';
+  wrap.className     = `message ${isOwn ? 'own' : 'other'}`;
+  wrap.dataset.msgId = message._id || '';
 
   // Highlight if pinned
-  if (event.event_id && isPinned(event.event_id)) {
+  if (message._id && isPinned(message._id)) {
     wrap.classList.add('pinned-highlight');
   }
 
   // Sender label (hidden for own messages via CSS)
   const senderEl = document.createElement('div');
   senderEl.className   = 'sender';
-  senderEl.textContent = senderLabel(event.sender);
+  senderEl.textContent = senderLabel(message);
   wrap.appendChild(senderEl);
 
   // Body
   const bodyEl = document.createElement('div');
   bodyEl.className = 'body';
 
-  let imgElForCopy = null; // set in m.image case so copy button can grab the loaded image
+  let imgElForCopy = null;
 
-  switch (content.msgtype) {
-    case 'm.text': {
-      const replyTo = content['m.relates_to']?.['m.in_reply_to'];
-      if (replyTo) {
-        const fullBody  = content.body || '';
-        const replyText = extractReplyText(fullBody);
+  // Determine message type from content
+  const isImage = hasImage(message);
+  const isFile  = hasFile(message) && !isImage;
+  const fileUrl = getFileUrl(message);
 
-        // Build quote block immediately using the Matrix fallback body,
-        // then replace it with real content from the original event async.
-        const quoteEl = document.createElement('div');
-        quoteEl.className       = 'reply-quote';
-        quoteEl.dataset.replyTo = replyTo.event_id;
-        quoteEl.title           = 'Click to jump to original message';
-        quoteEl.style.cursor    = 'pointer';
-        quoteEl.addEventListener('click', () => scrollToMessage(replyTo.event_id));
+  if (message.tmid && msgText) {
+    // Reply message — has thread parent (tmid)
+    const quoteEl = document.createElement('div');
+    quoteEl.className       = 'reply-quote';
+    quoteEl.dataset.replyTo = message.tmid;
+    quoteEl.title           = 'Click to jump to original message';
+    quoteEl.style.cursor    = 'pointer';
+    quoteEl.addEventListener('click', () => scrollToMessage(message.tmid));
+    quoteEl.textContent = '...';
 
-        // Immediate placeholder from fallback body
-        const splitIdx  = fullBody.indexOf('\n\n');
-        const quotedRaw = splitIdx !== -1 ? fullBody.slice(0, splitIdx) : '';
-        const fallback  = quotedRaw
-          .split('\n')
-          .map(l => l.replace(/^> /, '').replace(/^<[^>]+>\s*/, ''))
-          .join('\n').trim();
-        quoteEl.textContent = fallback || '…';
+    enrichQuoteBlock(quoteEl, message.tmid);
 
-        // Async: replace with sender name + real content / image thumbnail
-        enrichQuoteBlock(quoteEl, replyTo.event_id);
-
-        bodyEl.appendChild(quoteEl);
-        linkify(bodyEl, replyText);
-      } else {
-        linkify(bodyEl, content.body || '');
+    bodyEl.appendChild(quoteEl);
+    linkify(bodyEl, msgText);
+  } else if (isImage && fileUrl) {
+    // Image message
+    const img = document.createElement('img');
+    img.alt   = message.msg || getFileName(message) || 'image';
+    img.style.cursor = 'pointer';
+    img.addEventListener('click', () => {
+      window.bracerChat.openImageInApp(fileUrl, getFileName(message) || 'image.png');
+    });
+    bodyEl.appendChild(img);
+    imgElForCopy = img;
+    window.bracerChat.resolveMediaUrl(fileUrl).then(httpUrl => {
+      if (httpUrl) {
+        img.addEventListener('load', scrollToBottom);
+        img.src = httpUrl;
       }
-      break;
+    });
+    // Also show text if present alongside image
+    if (msgText) {
+      const textEl = document.createElement('div');
+      linkify(textEl, msgText);
+      bodyEl.appendChild(textEl);
     }
-
-    case 'm.image': {
-      if (content.url) {
-        const img = document.createElement('img');
-        img.alt   = content.body || 'image';
-        img.style.cursor = 'pointer';
-        img.addEventListener('click', () => {
-          window.bracerChat.openImageInApp(content.url, content.body || 'image.png');
-        });
-        bodyEl.appendChild(img);
-        imgElForCopy = img; // reference for copy button
-        // Resolve URL async without blocking bubble render
-        window.bracerChat.resolveMediaUrl(content.url).then(httpUrl => {
-          if (httpUrl) {
-            img.addEventListener('load', scrollToBottom);
-            img.src = httpUrl;
-          }
-        });
-      } else {
-        bodyEl.textContent = content.body || '[image]';
+  } else if (isFile && fileUrl) {
+    // File message
+    const fileName = getFileName(message);
+    const link = document.createElement('a');
+    link.className   = 'file-link';
+    link.textContent = fileName;
+    link.href        = '#';
+    link.addEventListener('click', async (e) => {
+      e.preventDefault();
+      link.textContent = 'Downloading\u2026';
+      try {
+        await window.bracerChat.downloadFile(fileUrl, fileName);
+      } catch (err) {
+        showStatus('Download failed: ' + err.message);
+      } finally {
+        link.textContent = fileName;
       }
-      break;
+    });
+    bodyEl.appendChild(link);
+    if (msgText) {
+      const textEl = document.createElement('div');
+      linkify(textEl, msgText);
+      bodyEl.appendChild(textEl);
     }
-
-    case 'm.file': {
-      const link = document.createElement('a');
-      link.className   = 'file-link';
-      link.textContent = content.body || 'Download file';
-      link.href        = '#';
-      if (content.url) {
-        const fileName = content.body || 'file';
-        link.addEventListener('click', async (e) => {
-          e.preventDefault();
-          link.textContent = 'Downloading…';
-          try {
-            await window.bracerChat.downloadFile(content.url, fileName);
-          } catch (err) {
-            showStatus('Download failed: ' + err.message);
-          } finally {
-            link.textContent = fileName;
-          }
-        });
-      }
-      bodyEl.appendChild(link);
-      break;
-    }
-
-    default:
-      bodyEl.textContent = content.body || '[unsupported message type]';
+  } else if (msgText) {
+    // Plain text message
+    linkify(bodyEl, msgText);
+  } else {
+    bodyEl.textContent = '[unsupported message type]';
   }
 
   wrap.appendChild(bodyEl);
@@ -530,32 +526,30 @@ function renderMessage(event, prepend = false) {
   // Timestamp
   const timeEl = document.createElement('div');
   timeEl.className   = 'time';
-  timeEl.textContent = formatTime(event.origin_server_ts);
+  timeEl.textContent = formatTime(message.ts);
   wrap.appendChild(timeEl);
 
-  // Reply button (hover to reveal)
-  wrap.appendChild(makeReplyBtn(event));
+  // Reply button
+  wrap.appendChild(makeReplyBtn(message));
 
-  // Pin button (hover to reveal; always visible when pinned)
-  const pinBtn = makePinBtn(event);
+  // Pin button
+  const pinBtn = makePinBtn(message);
   if (pinBtn) wrap.appendChild(pinBtn);
 
   // Copy button
-  wrap.appendChild(makeCopyBtn(event, undefined, imgElForCopy));
+  wrap.appendChild(makeCopyBtn(message, undefined, imgElForCopy));
 
-  // Store event data on the element for context menu and ordering
-  wrap._matrixEvent = event;
+  // Store message data on the element
+  wrap._message = message;
 
   if (prepend) {
     elMessages.insertBefore(wrap, elMessages.firstChild);
   } else {
-    // Insert in chronological order by timestamp rather than always appending.
-    // This keeps optimistic renders and sync-delivered messages in the right order.
-    const ts = event.origin_server_ts || 0;
+    const ts = getMsgTs(message);
     let insertBefore = null;
     const bubbles = elMessages.children;
     for (let i = bubbles.length - 1; i >= 0; i--) {
-      const sibTs = bubbles[i]._matrixEvent?.origin_server_ts || 0;
+      const sibTs = bubbles[i]._message ? getMsgTs(bubbles[i]._message) : 0;
       if (sibTs <= ts) {
         insertBefore = bubbles[i].nextSibling;
         break;
@@ -569,37 +563,33 @@ function renderMessage(event, prepend = false) {
 async function loadHistory() {
   elMessages.innerHTML = '';
   const cutoff    = Date.now() - RETENTION_MS;
-  const pinnedIds = new Set(loadPinned().map(p => p.event_id));
+  const pinnedIds = new Set(loadPinned().map(p => p._id));
 
-  // Load machine room messages — paginate back to the 24-hour cutoff
-  const machineEvents = await window.bracerChat.getRoomHistory(activeRoomId, cutoff);
+  // Load machine room messages
+  const messages = await window.bracerChat.getRoomHistory(activeRoomId, cutoff);
   let renderCount = 0;
-  for (const event of machineEvents) {
-    if (POLL_START_TYPES.includes(event.type)) {
-      renderPoll(event);
-      if (++renderCount % 20 === 0) await yieldToEventLoop();
-      continue;
-    }
-    if (event.type !== 'm.room.message') continue;
-    const isImage = event.content && event.content.msgtype === 'm.image';
-    const isFile  = event.content && event.content.msgtype === 'm.file';
+  for (const msg of messages) {
+    if (msg.t) continue; // skip system messages
+    const msgTs = getMsgTs(msg);
+    const isImg = hasImage(msg);
+    const isFl  = hasFile(msg);
     URL_REGEX.lastIndex = 0;
-    const hasLink = event.content && event.content.body && URL_REGEX.test(event.content.body);
-    if (event.origin_server_ts >= cutoff || pinnedIds.has(event.event_id) || isImage || isFile || hasLink) {
-      renderMessage(event);
+    const hasLink = msg.msg && URL_REGEX.test(msg.msg);
+    if (msgTs >= cutoff || pinnedIds.has(msg._id) || isImg || isFl || hasLink) {
+      renderMessage(msg);
       if (++renderCount % 20 === 0) await yieldToEventLoop();
     }
   }
 
-  // Load broadcast room history and render as broadcast announcements
+  // Load broadcast room history
   if (sessionInfo && sessionInfo.broadcastRoomId) {
     try {
-      const bcastEvents = await window.bracerChat.getRoomHistory(sessionInfo.broadcastRoomId, cutoff);
+      const bcastMsgs = await window.bracerChat.getRoomHistory(sessionInfo.broadcastRoomId, cutoff);
       renderCount = 0;
-      for (const event of bcastEvents) {
-        if (event.origin_server_ts < cutoff) continue;
-        if (event.type === 'm.room.message' || event.type === 'm.room.encrypted') {
-          renderBroadcast(event, 'Bracer Systems Broadcast');
+      for (const msg of bcastMsgs) {
+        if (getMsgTs(msg) < cutoff) continue;
+        if (!msg.t) {
+          renderBroadcast(msg, 'Bracer Systems Broadcast');
           if (++renderCount % 20 === 0) await yieldToEventLoop();
         }
       }
@@ -609,12 +599,12 @@ async function loadHistory() {
   }
   if (sessionInfo && sessionInfo.companyRoomId) {
     try {
-      const coEvents = await window.bracerChat.getRoomHistory(sessionInfo.companyRoomId, cutoff);
+      const coMsgs = await window.bracerChat.getRoomHistory(sessionInfo.companyRoomId, cutoff);
       renderCount = 0;
-      for (const event of coEvents) {
-        if (event.origin_server_ts < cutoff) continue;
-        if (event.type === 'm.room.message' || event.type === 'm.room.encrypted') {
-          renderBroadcast(event, `${sessionInfo.companyName} Broadcast`);
+      for (const msg of coMsgs) {
+        if (getMsgTs(msg) < cutoff) continue;
+        if (!msg.t) {
+          renderBroadcast(msg, `${sessionInfo.companyName} Broadcast`);
           if (++renderCount % 20 === 0) await yieldToEventLoop();
         }
       }
@@ -623,14 +613,13 @@ async function loadHistory() {
     }
   }
 
-  scrollToBottom(true); // Force scroll after initial history load
+  scrollToBottom(true);
 }
 
 function isNearBottom() {
   return elMessages.scrollHeight - elMessages.scrollTop - elMessages.clientHeight < 150;
 }
 
-/** Scroll to bottom only if the user hasn't scrolled up to read history. */
 function scrollToBottom(force = false) {
   if (force || isNearBottom()) {
     elMessages.scrollTop = elMessages.scrollHeight;
@@ -642,12 +631,9 @@ function scrollToBottom(force = false) {
 let audioCtx = null;
 
 function playNotificationSound() {
-  // Only beep when the window is hidden — if the user is already looking at
-  // the app, the sound is distracting and redundant.
   if (!document.hidden) return;
   try {
     if (!audioCtx) audioCtx = new AudioContext();
-    // AudioContext may be suspended until a user gesture has occurred
     if (audioCtx.state === 'suspended') audioCtx.resume();
 
     const osc  = audioCtx.createOscillator();
@@ -656,167 +642,37 @@ function playNotificationSound() {
     gain.connect(audioCtx.destination);
 
     osc.type            = 'sine';
-    osc.frequency.value = 880; // A5 — soft, high ding
+    osc.frequency.value = 880;
 
     const t = audioCtx.currentTime;
     gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(0.18, t + 0.01); // quick attack
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4); // decay
+    gain.gain.linearRampToValueAtTime(0.18, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
 
     osc.start(t);
     osc.stop(t + 0.4);
   } catch (err) {
-    // Audio not available — fail silently
+    // Audio not available
   }
 }
 
-// ── Incoming messages (from sync loop) ────────────────────────────────────
+// ── Incoming messages (from DDP WebSocket) ───────────────────────────────
 
-// ── Poll rendering ─────────────────────────────────────────────────────────
-
-const POLL_START_TYPES = ['m.poll.start', 'org.matrix.msc3381.poll.start'];
-
-// Extract text from any of the various Matrix poll text formats
-function _pollText(obj) {
-  if (!obj) return '';
-  if (typeof obj === 'string') return obj;
-  // Stable array format: { "m.text": [{ "body": "..." }] }
-  const mt = obj['m.text'];
-  if (Array.isArray(mt))        return mt[0]?.body || mt[0] || '';
-  if (typeof mt === 'string')   return mt;
-  // Unstable text field
-  const ut = obj['org.matrix.msc3381.text'];
-  if (ut) return typeof ut === 'string' ? ut : (ut[0]?.body || '');
-  // Plain body fallback
-  return obj.body || '';
-}
-
-function parsePollContent(event) {
-  const c = event.content || {};
-
-  // Stable: m.poll (Matrix 1.6+, Element Web 1.11+)
-  if (c['m.poll']) {
-    const p = c['m.poll'];
-    const question = _pollText(p.question);
-    const answers  = (p.answers || []).map(a => ({
-      id  : a.id || '',
-      text: _pollText(a)
-    })).filter(a => a.text);
-    return { question, answers };
+async function handleIncomingMessage({ roomId, message }) {
+  if (message._id && findBubbleById(message._id)) {
+    return; // already rendered (dedup)
   }
 
-  // Unstable: org.matrix.msc3381.poll.start
-  // Element Web sends answers with text in 'org.matrix.msc1767.text' (MSC1767 extensible events)
-  const u = c['org.matrix.msc3381.poll.start'];
-  if (u) {
-    const question = _pollText(u.question);
-    const answers  = (u.answers || []).map(a => ({
-      id  : a.id || '',
-      text: a['org.matrix.msc1767.text'] || _pollText(a['org.matrix.msc3381.poll.answer']) || _pollText(a)
-    })).filter(a => a.text);
-    return { question, answers };
-  }
-
-  return null;
-}
-
-function renderPoll(event, prepend = false) {
-  if (!event || !event.content) return;
-  const poll = parsePollContent(event);
-  if (!poll) return;
-
-  const isOwn = sessionInfo && event.sender === sessionInfo.userId;
-
-  const wrap = document.createElement('div');
-  wrap.className       = `message poll-message ${isOwn ? 'own' : 'other'}`;
-  wrap.dataset.eventId = event.event_id || '';
-  wrap._matrixEvent    = event;
-
-  if (event.event_id && isPinned(event.event_id)) wrap.classList.add('pinned-highlight');
-
-  const senderEl = document.createElement('div');
-  senderEl.className   = 'sender';
-  senderEl.textContent = senderLabel(event.sender);
-  wrap.appendChild(senderEl);
-
-  const card = document.createElement('div');
-  card.className = 'poll-card';
-
-  const headerEl = document.createElement('div');
-  headerEl.className   = 'poll-header';
-  headerEl.textContent = '📊 Poll';
-  card.appendChild(headerEl);
-
-  const questionEl = document.createElement('div');
-  questionEl.className   = 'poll-question';
-  questionEl.textContent = poll.question;
-  card.appendChild(questionEl);
-
-  const optionsEl = document.createElement('ul');
-  optionsEl.className = 'poll-options';
-  poll.answers.forEach(({ id, text }) => {
-    const li = document.createElement('li');
-    li.textContent       = text;
-    li.dataset.answerId  = id;
-    li.title             = 'Click to vote';
-    li.addEventListener('click', async () => {
-      if (li.classList.contains('poll-voted')) return; // already voted for this option
-      try {
-        await window.bracerChat.sendPollResponse(activeRoomId, event.event_id, id);
-        // Clear all vote state, then mark the new selection (allows changing vote)
-        optionsEl.querySelectorAll('li').forEach(el => el.classList.remove('poll-selected', 'poll-voted'));
-        li.classList.add('poll-selected', 'poll-voted');
-      } catch (err) {
-        console.error('[Poll] Vote failed:', err);
-      }
-    });
-    optionsEl.appendChild(li);
-  });
-  card.appendChild(optionsEl);
-
-  wrap.appendChild(card);
-
-  const timeEl = document.createElement('div');
-  timeEl.className   = 'time';
-  timeEl.textContent = formatTime(event.origin_server_ts);
-  wrap.appendChild(timeEl);
-
-  const pinBtn = makePinBtn(event);
-  if (pinBtn) wrap.appendChild(pinBtn);
-
-  const copyText = poll.question + '\n' + poll.answers.map((a, i) => `${i + 1}. ${a.text}`).join('\n');
-  wrap.appendChild(makeCopyBtn(event, copyText));
-
-  if (prepend) {
-    elMessages.insertBefore(wrap, elMessages.firstChild);
-  } else {
-    const ts = event.origin_server_ts || 0;
-    let insertBefore = null;
-    const bubbles = elMessages.children;
-    for (let i = bubbles.length - 1; i >= 0; i--) {
-      const sibTs = bubbles[i]._matrixEvent?.origin_server_ts || 0;
-      if (sibTs <= ts) { insertBefore = bubbles[i].nextSibling; break; }
-      insertBefore = bubbles[i];
-    }
-    elMessages.insertBefore(wrap, insertBefore);
-  }
-}
-
-async function handleIncomingMessage({ roomId, event }) {
-  if (event.event_id && document.querySelector(`[data-event-id="${CSS.escape(event.event_id)}"]`)) {
-    return;
-  }
-
-  // Broadcast rooms — render as announcement above the chat
+  // Broadcast rooms — render as announcement
   if (sessionInfo && roomId === sessionInfo.broadcastRoomId) {
     playNotificationSound();
-    renderBroadcast(event, 'Bracer Systems Broadcast');
+    renderBroadcast(message, 'Bracer Systems Broadcast');
     scrollToBottom();
     return;
   }
   if (sessionInfo && roomId === sessionInfo.companyRoomId) {
     playNotificationSound();
-    renderBroadcast(event, `${sessionInfo.companyName} Broadcast`);
+    renderBroadcast(message, `${sessionInfo.companyName} Broadcast`);
     scrollToBottom();
     return;
   }
@@ -825,31 +681,26 @@ async function handleIncomingMessage({ roomId, event }) {
     return;
   }
 
-  const isOwn = sessionInfo && event.sender === sessionInfo.userId;
+  const isOwn = sessionInfo && message.u?._id === sessionInfo.userId;
   if (!isOwn) playNotificationSound();
 
   const wasNearBottom = isNearBottom();
-  if (POLL_START_TYPES.includes(event.type)) {
-    renderPoll(event);
-  } else {
-    renderMessage(event);
-  }
+  renderMessage(message);
   applySearch();
   scrollToBottom(wasNearBottom);
-  // Schedule a delayed read receipt if the window is visible
-  if (!document.hidden && event.event_id) {
+  if (!document.hidden && message._id) {
     scheduleReadReceipt();
   }
 }
 
-function makePinBtn(event) {
-  if (!event.event_id) return null;
+function makePinBtn(message) {
+  if (!message._id) return null;
   const btn = document.createElement('button');
   btn.className = 'pin-btn';
 
   function updateState() {
-    const pinned = isPinned(event.event_id);
-    btn.textContent = '📌';
+    const pinned = isPinned(message._id);
+    btn.textContent = '\uD83D\uDCCC'; // pin emoji
     btn.title       = pinned ? 'Unpin message' : 'Pin message';
     btn.classList.toggle('pinned', pinned);
   }
@@ -857,10 +708,10 @@ function makePinBtn(event) {
 
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (isPinned(event.event_id)) {
-      unpinMessage(event.event_id);
+    if (isPinned(message._id)) {
+      unpinMessageLocal(message._id);
     } else {
-      pinMessage(event);
+      pinMessageLocal(message);
     }
     updateState();
   });
@@ -868,7 +719,7 @@ function makePinBtn(event) {
   return btn;
 }
 
-function makeCopyBtn(event, textOverride, imgEl) {
+function makeCopyBtn(message, textOverride, imgEl) {
   const btn = document.createElement('button');
   btn.className   = 'copy-btn';
   btn.textContent = 'Copy';
@@ -878,7 +729,6 @@ function makeCopyBtn(event, textOverride, imgEl) {
     e.stopPropagation();
 
     if (imgEl && imgEl.src && imgEl.src.startsWith('data:')) {
-      // Copy full-res image via Electron native clipboard
       window.bracerChat.clipboardWriteImage(imgEl.src).then(() => {
         btn.textContent = 'Copied!';
         btn.classList.add('copied');
@@ -887,10 +737,8 @@ function makeCopyBtn(event, textOverride, imgEl) {
       return;
     }
 
-    // Copy text via execCommand
-    const body = textOverride !== undefined ? textOverride
-      : (event.content && event.content.body ? event.content.body : '');
-    const ts   = event.origin_server_ts ? `[${formatTime(event.origin_server_ts)}] ` : '';
+    const body = textOverride !== undefined ? textOverride : (message.msg || '');
+    const ts   = message.ts ? `[${formatTime(message.ts)}] ` : '';
     const text = ts + body;
     window.bracerChat.clipboardWrite(text);
     btn.textContent = 'Copied!';
@@ -900,34 +748,33 @@ function makeCopyBtn(event, textOverride, imgEl) {
   return btn;
 }
 
-function makeReplyBtn(event) {
+function makeReplyBtn(message) {
   const btn = document.createElement('button');
   btn.className   = 'reply-btn';
-  btn.textContent = '↩';
+  btn.textContent = '\u21A9'; // reply arrow
   btn.title       = 'Reply to this message';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    setReply(event);
+    setReply(message);
   });
   return btn;
 }
 
-function renderBroadcast(event, label) {
-  if (!event.content) {
-    console.warn('[app] renderBroadcast: event.content is falsy, skipping', event.event_id);
+function renderBroadcast(message, label) {
+  if (!message || !message.msg) {
+    console.warn('[app] renderBroadcast: message empty, skipping', message?._id);
     return;
   }
-  // Deduplicate — same event can arrive via both history load and live sync
-  const dedupKey = event.event_id || `${event.origin_server_ts}_${event.sender}`;
+  const dedupKey = message._id || `${message.ts}_${message.u?.username}`;
   if (renderedBroadcastIds.has(dedupKey)) {
     return;
   }
   renderedBroadcastIds.add(dedupKey);
 
   const wrap = document.createElement('div');
-  wrap.className       = 'broadcast-message';
-  wrap.dataset.eventId = event.event_id || '';
-  wrap._matrixEvent    = event;
+  wrap.className     = 'broadcast-message';
+  wrap.dataset.msgId = message._id || '';
+  wrap._message      = message;
 
   const labelEl = document.createElement('div');
   labelEl.className   = 'broadcast-label';
@@ -938,23 +785,33 @@ function renderBroadcast(event, label) {
 
   const bodyEl = document.createElement('div');
   bodyEl.className = 'broadcast-body';
-  const bodyText = event.type === 'm.room.message'
-    ? (event.content.body || '')
-    : '[Encrypted broadcast — message cannot be displayed. Ask your admin to disable encryption on this room.]';
-  linkify(bodyEl, bodyText);
+  linkify(bodyEl, message.msg);
 
   const timeEl = document.createElement('div');
   timeEl.className   = 'time';
-  timeEl.textContent = formatTime(event.origin_server_ts);
+  timeEl.textContent = formatTime(message.ts);
 
   box.appendChild(bodyEl);
   box.appendChild(timeEl);
-  const broadcastPinBtn = makePinBtn(event);
+  const broadcastPinBtn = makePinBtn(message);
   if (broadcastPinBtn) box.appendChild(broadcastPinBtn);
-  box.appendChild(makeCopyBtn(event, bodyText));
+  box.appendChild(makeCopyBtn(message, message.msg));
   wrap.appendChild(labelEl);
   wrap.appendChild(box);
-  elMessages.appendChild(wrap);
+
+  // Insert in chronological order (same as renderMessage)
+  const ts = getMsgTs(message);
+  let insertBefore = null;
+  const bubbles = elMessages.children;
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const sibTs = bubbles[i]._message ? getMsgTs(bubbles[i]._message) : 0;
+    if (sibTs <= ts) {
+      insertBefore = bubbles[i].nextSibling;
+      break;
+    }
+    insertBefore = bubbles[i];
+  }
+  elMessages.insertBefore(wrap, insertBefore);
 }
 
 // ── Send message ───────────────────────────────────────────────────────────
@@ -963,11 +820,10 @@ async function sendMessage() {
   const text = elMsgInput.value.trim();
   if (!text) return;
 
-  const replyTarget = replyToEvent; // capture before clearing
+  const replyTarget = replyToMessage;
   elMsgInput.value = '';
   autoResizeTextarea();
   clearReply();
-  // Stop typing indicator immediately on send
   if (_isTyping) {
     _isTyping = false;
     clearTimeout(_typingTimer);
@@ -978,37 +834,29 @@ async function sendMessage() {
   try {
     if (replyTarget) {
       await window.bracerChat.sendReply(activeRoomId, text, replyTarget);
-      // Optimistic render — include reply relation so quote block shows immediately
-      const origBody   = (replyTarget.content && replyTarget.content.body) || '[attachment]';
-      const origSender = replyTarget.sender || '';
-      const fallback   = `> <${origSender}> ${origBody}\n\n${text}`;
+      // Optimistic render
       renderMessage({
-        type             : 'm.room.message',
-        sender           : sessionInfo.userId,
-        event_id         : `local-${Date.now()}`,
-        content          : {
-          msgtype        : 'm.text',
-          body           : fallback,
-          'm.relates_to' : { 'm.in_reply_to': { event_id: replyTarget.event_id } }
-        },
-        origin_server_ts : Date.now()
+        _id : `local-${Date.now()}`,
+        msg : text,
+        tmid: replyTarget._id,
+        ts  : new Date().toISOString(),
+        u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' }
       });
     } else {
       await window.bracerChat.sendMessage(activeRoomId, text);
       renderMessage({
-        type             : 'm.room.message',
-        sender           : sessionInfo.userId,
-        event_id         : `local-${Date.now()}`,
-        content          : { msgtype: 'm.text', body: text },
-        origin_server_ts : Date.now()
+        _id : `local-${Date.now()}`,
+        msg : text,
+        ts  : new Date().toISOString(),
+        u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' }
       });
     }
-    scrollToBottom(true); // own message — always scroll down
+    scrollToBottom(true);
 
   } catch (err) {
     showStatus('Send failed: ' + err.message);
     elMsgInput.value = text;
-    if (replyTarget) setReply(replyTarget); // restore reply state on failure
+    if (replyTarget) setReply(replyTarget);
   } finally {
     elBtnSend.disabled = false;
     elMsgInput.focus();
@@ -1021,7 +869,7 @@ async function attachFile() {
   elBtnAttach.disabled = true;
   try {
     const result = await window.bracerChat.openFileDialog();
-    if (!result) return; // user cancelled
+    if (!result) return;
     await sendFileByPath(result);
   } catch (err) {
     showStatus('Attach failed: ' + err.message);
@@ -1036,23 +884,29 @@ async function sendFileByPath({ name, mimeType, data }) {
     showStatus(`File too large: ${(data.byteLength / 1024 / 1024).toFixed(1)} MB (max 100 MB)`);
     return;
   }
-  showStatus(`Uploading ${name}…`);
+  showStatus(`Uploading ${name}\u2026`);
   try {
-    const { mxcUri, fileName, mimeType: resolvedMime } =
+    const { fileUrl, fileName, mimeType: resolvedMime } =
       await window.bracerChat.sendFile(activeRoomId, data, name, mimeType);
     hideStatus();
 
-    // Optimistic render — show file/image immediately without waiting for sync
-    const isImage   = resolvedMime && resolvedMime.startsWith('image/');
-    const msgtype   = isImage ? 'm.image' : 'm.file';
-    renderMessage({
-      type             : 'm.room.message',
-      sender           : sessionInfo.userId,
-      event_id         : `local-${Date.now()}`,
-      content          : { msgtype, body: fileName, url: mxcUri },
-      origin_server_ts : Date.now()
-    });
-    scrollToBottom(true); // own send — always scroll down
+    // Optimistic render
+    const isImage = resolvedMime && resolvedMime.startsWith('image/');
+    const msg = {
+      _id : `local-${Date.now()}`,
+      msg : fileName,
+      ts  : new Date().toISOString(),
+      u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' }
+    };
+    if (fileUrl) {
+      msg.attachments = [{
+        title     : fileName,
+        title_link: fileUrl,
+        ...(isImage ? { image_url: fileUrl } : {})
+      }];
+    }
+    renderMessage(msg);
+    scrollToBottom(true);
   } catch (err) {
     showStatus('Upload failed: ' + err.message);
   }
@@ -1064,14 +918,9 @@ function hideScreenPicker() {
   elScreenPicker.classList.remove('visible');
 }
 
-// Renders the screen picker with displays laid out proportionally to match
-// their physical arrangement in Windows display settings.
-// Each display element stores its sourceId as ._sourceId so thumbnails can
-// be patched in later without rebuilding the whole picker.
 function showScreenPicker(screens, onSelect) {
   elScreenPickerMap.innerHTML = '';
 
-  // Compute bounding box of all displays in virtual screen coordinates.
   const minX = Math.min(...screens.map(s => s.bounds.x));
   const minY = Math.min(...screens.map(s => s.bounds.y));
   const maxX = Math.max(...screens.map(s => s.bounds.x + s.bounds.width));
@@ -1080,7 +929,6 @@ function showScreenPicker(screens, onSelect) {
   const virtualW = maxX - minX;
   const virtualH = maxY - minY;
 
-  // Scale to fit within the 266px wide map area (290px picker − 24px padding).
   const mapW    = 266;
   const scale   = mapW / virtualW;
   const mapH    = Math.round(virtualH * scale);
@@ -1090,16 +938,14 @@ function showScreenPicker(screens, onSelect) {
   screens.forEach((s, i) => {
     const el = document.createElement('div');
     el.className    = 'screen-picker-display';
-    el._sourceId    = s.id;   // updated later when thumbnails arrive
+    el._sourceId    = s.id;
     el.dataset.idx  = i;
 
-    // Position and size proportionally.
     el.style.left   = Math.round((s.bounds.x - minX) * scale) + 'px';
     el.style.top    = Math.round((s.bounds.y - minY) * scale) + 'px';
     el.style.width  = Math.round(s.bounds.width  * scale) + 'px';
     el.style.height = Math.round(s.bounds.height * scale) + 'px';
 
-    // Thumbnail preview (may be null on first render — patched in async).
     if (s.thumbnail) {
       const img = document.createElement('img');
       img.src = s.thumbnail;
@@ -1107,13 +953,11 @@ function showScreenPicker(screens, onSelect) {
       el.appendChild(img);
     }
 
-    // Label bar.
     const label = document.createElement('div');
     label.className   = 'screen-picker-label';
     label.textContent = s.label;
     el.appendChild(label);
 
-    // Click handler reads ._sourceId at click time so async updates work.
     el.addEventListener('click', () => {
       hideScreenPicker();
       onSelect(el._sourceId);
@@ -1125,13 +969,12 @@ function showScreenPicker(screens, onSelect) {
   elScreenPicker.classList.add('visible');
 }
 
-// Patches thumbnails and sourceIds into an already-visible picker.
 function updateScreenPickerThumbnails(screens) {
   const els = elScreenPickerMap.querySelectorAll('.screen-picker-display');
   screens.forEach((s, i) => {
     const el = els[i];
     if (!el) return;
-    el._sourceId = s.id; // update sourceId for click handler
+    el._sourceId = s.id;
     if (s.thumbnail) {
       let img = el.querySelector('img');
       if (!img) {
@@ -1148,21 +991,20 @@ function updateScreenPickerThumbnails(screens) {
 
 async function captureAndSend(sourceId) {
   elBtnShot.disabled = true;
-  showStatus('Capturing screenshot…');
+  showStatus('Capturing screenshot\u2026');
   try {
-    const { mxcUri, fileName } = await window.bracerChat.sendScreenshot(activeRoomId, sourceId);
+    const { fileUrl, fileName } = await window.bracerChat.sendScreenshot(activeRoomId, sourceId);
     hideStatus();
-    // Optimistic render — show screenshot immediately without waiting for sync
     renderMessage({
-      type             : 'm.room.message',
-      sender           : sessionInfo.userId,
-      event_id         : `local-${Date.now()}`,
-      content          : { msgtype: 'm.image', body: fileName, url: mxcUri },
-      origin_server_ts : Date.now()
+      _id : `local-${Date.now()}`,
+      msg : fileName,
+      ts  : new Date().toISOString(),
+      u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' },
+      attachments: fileUrl ? [{ title: fileName, title_link: fileUrl, image_url: fileUrl }] : []
     });
-    scrollToBottom(true); // own send — always scroll down
+    scrollToBottom(true);
   } catch (err) {
-    showStatus('Screenshot failed: ' + err.message, 0); // persistent
+    showStatus('Screenshot failed: ' + err.message, 0);
     console.error('[app] Screenshot error:', err);
   } finally {
     elBtnShot.disabled = false;
@@ -1170,25 +1012,18 @@ async function captureAndSend(sourceId) {
 }
 
 async function sendScreenshot() {
-  // Get layout instantly (no thumbnail capture) so the picker appears immediately.
   const layout = await window.bracerChat.getScreenLayout();
 
   if (layout.length <= 1) {
-    // Single screen — skip picker, go straight to capture.
     await captureAndSend(null);
     return;
   }
 
-  // Show picker right away with placeholder boxes (no thumbnails yet).
   showScreenPicker(layout, (sourceId) => captureAndSend(sourceId));
 
-  // Give the user 200ms to cancel before starting thumbnail capture.
-  // If cancelled in that window, skip the heavy getSources() call entirely
-  // so the main process stays free and the app feels responsive.
   await new Promise(r => setTimeout(r, 200));
   if (!elScreenPicker.classList.contains('visible')) return;
 
-  // Load thumbnails in the background and patch them in if picker is still open.
   window.bracerChat.getScreens().then(screens => {
     if (elScreenPicker.classList.contains('visible')) {
       updateScreenPickerThumbnails(screens);
@@ -1236,20 +1071,19 @@ function autoResizeTextarea() {
 
 function hideCtxMenu() {
   elCtxMenu.classList.remove('visible');
-  ctxTargetEventId = null;
+  ctxTargetMsgId = null;
 }
 
 elMessages.addEventListener('contextmenu', (e) => {
   const bubble = e.target.closest('.message') || e.target.closest('.broadcast-message');
-  if (!bubble || !bubble._matrixEvent) return;
+  if (!bubble || !bubble._message) return;
 
   e.preventDefault();
-  ctxTargetEventId = bubble._matrixEvent.event_id;
+  ctxTargetMsgId = bubble._message._id;
 
-  const pinned = isPinned(ctxTargetEventId);
-  elCtxPin.textContent = pinned ? '📌 Unpin message' : '📌 Pin message';
+  const pinned = isPinned(ctxTargetMsgId);
+  elCtxPin.textContent = pinned ? '\uD83D\uDCCC Unpin message' : '\uD83D\uDCCC Pin message';
 
-  // Position near cursor, keep within viewport
   const menuW = 160, menuH = 40;
   let x = e.clientX, y = e.clientY;
   if (x + menuW > window.innerWidth)  x = window.innerWidth  - menuW - 4;
@@ -1261,20 +1095,18 @@ elMessages.addEventListener('contextmenu', (e) => {
 });
 
 elCtxPin.addEventListener('click', () => {
-  if (!ctxTargetEventId) return;
-  if (isPinned(ctxTargetEventId)) {
-    unpinMessage(ctxTargetEventId);
+  if (!ctxTargetMsgId) return;
+  if (isPinned(ctxTargetMsgId)) {
+    unpinMessageLocal(ctxTargetMsgId);
   } else {
-    // Find the event from a rendered bubble
-    const bubble = document.querySelector(`[data-event-id="${ctxTargetEventId}"]`);
-    if (bubble && bubble._matrixEvent) pinMessage(bubble._matrixEvent);
+    const bubble = findBubbleById(ctxTargetMsgId);
+    if (bubble && bubble._message) pinMessageLocal(bubble._message);
   }
   hideCtxMenu();
 });
 
 document.addEventListener('click', (e) => {
   hideCtxMenu();
-  // Close screen picker if clicking outside it
   if (!elScreenPicker.contains(e.target) && e.target !== elBtnShot) {
     hideScreenPicker();
   }
@@ -1312,7 +1144,6 @@ elMsgInput.addEventListener('keydown', (e) => {
 elMsgInput.addEventListener('input', autoResizeTextarea);
 
 // ── Typing indicator — outbound ─────────────────────────────────────────
-// Send typing notification when user types, with debounce to avoid spam.
 let _typingTimer = null;
 let _isTyping    = false;
 elMsgInput.addEventListener('input', () => {
@@ -1329,35 +1160,26 @@ elMsgInput.addEventListener('input', () => {
 });
 
 // ── Typing indicator — inbound ──────────────────────────────────────────
-window.bracerChat.onTypingUpdate(({ roomId, userIds }) => {
+// main.js now sends accumulated usernames (not individual events)
+window.bracerChat.onTypingUpdate(({ roomId, usernames }) => {
   if (roomId !== activeRoomId) return;
-  if (userIds.length === 0) {
+  if (!usernames || usernames.length === 0) {
     elTypingInd.textContent = '';
-  } else if (userIds.length === 1) {
-    const name = userIds[0].split(':')[0].replace('@', '');
-    elTypingInd.textContent = `${name} is typing...`;
+  } else if (usernames.length === 1) {
+    elTypingInd.textContent = `${usernames[0]} is typing...`;
   } else {
     elTypingInd.textContent = 'Several people are typing...';
   }
 });
 
 // ── Read receipts ───────────────────────────────────────────────────────
-// Send read receipt only after the message has been visible for 3 seconds,
-// so it reflects the user actually reading it, not just the window opening.
-let _lastReceiptEventId = null;
 let _readReceiptTimer   = null;
 function scheduleReadReceipt() {
   clearTimeout(_readReceiptTimer);
   if (document.hidden || !activeRoomId) return;
   _readReceiptTimer = setTimeout(() => {
-    const bubbles = elMessages.children;
-    if (!bubbles.length) return;
-    const last = bubbles[bubbles.length - 1];
-    const evId = last._matrixEvent?.event_id;
-    if (evId && evId !== _lastReceiptEventId) {
-      _lastReceiptEventId = evId;
-      window.bracerChat.sendReadReceipt(activeRoomId, evId).catch(() => {});
-    }
+    // RC read receipt marks the entire room as read (no per-message ID needed)
+    window.bracerChat.sendReadReceipt(activeRoomId).catch(() => {});
   }, 3000);
 }
 document.addEventListener('visibilitychange', () => {
@@ -1369,7 +1191,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('focus', () => scheduleReadReceipt());
 
-// Right-click context menu on the compose textarea (Cut / Copy / Paste / Select All)
+// Right-click context menu on compose textarea
 elMsgInput.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   window.bracerChat.showInputContextMenu();
@@ -1383,22 +1205,17 @@ async function pasteClipboardImageB64(b64) {
   await sendFileByPath({ name: `paste-${Date.now()}.png`, mimeType: 'image/png', data: bytes.buffer });
 }
 
-// Paste image from clipboard via Ctrl+V (e.g. Win+Shift+S snip, copy image from browser).
-// Uses Electron native clipboard API as primary source because clipboardData.getAsFile()
-// returns an empty blob for Windows DIB-format images (common with snipping tool).
 elMsgInput.addEventListener('paste', async (e) => {
   const items = Array.from(e.clipboardData?.items || []);
   const imageItem = items.find(i => i.type.startsWith('image/'));
-  if (!imageItem) return; // no image — let normal text paste proceed
+  if (!imageItem) return;
   e.preventDefault();
-  // Use Electron main-process clipboard.readImage() — handles all Windows clipboard formats correctly
   const b64 = await window.bracerChat.readClipboardImage();
   if (b64) {
     await pasteClipboardImageB64(b64);
   }
 });
 
-// Paste image via right-click context menu → Paste (sent from main process)
 window.bracerChat.onPasteClipboardImage(async (b64) => {
   await pasteClipboardImageB64(b64);
 });
@@ -1430,7 +1247,6 @@ document.addEventListener('drop', (e) => {
   elDragOverlay.classList.remove('active');
   const file = e.dataTransfer && e.dataTransfer.files[0];
   if (!file) return;
-  // Read dropped file as ArrayBuffer and upload
   const reader = new FileReader();
   reader.onload = async () => {
     await sendFileByPath({
@@ -1445,22 +1261,18 @@ document.addEventListener('drop', (e) => {
 // ── Emoji picker ───────────────────────────────────────────────────────────
 
 const EMOJIS = [
-  // Smileys
-  '😀','😃','😄','😁','😆','😅','😂','🤣',
-  '😊','😇','🙂','😉','😌','😍','🥰','😘',
-  '😋','😛','😜','🤪','😎','🤩','🥳','😏',
-  '😐','😑','😶','🙄','😯','😲','😴','🤔',
-  '😭','😢','😤','😠','😡','🤬','😱','😨',
-  '😰','😓','🤗','🤭','🤫','😷','🤒','🤕',
-  // Gestures & people
-  '👍','👎','👌','🤙','👋','🤝','🙏','💪',
-  '👏','🤦','🤷','🙌','👀','💀','🎉','🔥',
-  // Hearts & symbols
-  '❤️','🧡','💛','💚','💙','💜','🖤','💔',
-  '💯','✅','❌','⚠️','❓','❗','💡','🔗',
-  // Work & misc
-  '📎','📋','📁','📧','📞','🖥️','⌨️','🖱️',
-  '🔒','🔓','🔑','⭐','🚀','🛑','✔️','➡️'
+  '\uD83D\uDE00','\uD83D\uDE03','\uD83D\uDE04','\uD83D\uDE01','\uD83D\uDE06','\uD83D\uDE05','\uD83D\uDE02','\uD83E\uDD23',
+  '\uD83D\uDE0A','\uD83D\uDE07','\uD83D\uDE42','\uD83D\uDE09','\uD83D\uDE0C','\uD83D\uDE0D','\uD83E\uDD70','\uD83D\uDE18',
+  '\uD83D\uDE0B','\uD83D\uDE1B','\uD83D\uDE1C','\uD83E\uDD2A','\uD83D\uDE0E','\uD83E\uDD29','\uD83E\uDD73','\uD83D\uDE0F',
+  '\uD83D\uDE10','\uD83D\uDE11','\uD83D\uDE36','\uD83D\uDE44','\uD83D\uDE2F','\uD83D\uDE32','\uD83D\uDE34','\uD83E\uDD14',
+  '\uD83D\uDE2D','\uD83D\uDE22','\uD83D\uDE24','\uD83D\uDE20','\uD83D\uDE21','\uD83E\uDD2C','\uD83D\uDE31','\uD83D\uDE28',
+  '\uD83D\uDE30','\uD83D\uDE13','\uD83E\uDD17','\uD83E\uDD2D','\uD83E\uDD2B','\uD83D\uDE37','\uD83E\uDD12','\uD83E\uDD15',
+  '\uD83D\uDC4D','\uD83D\uDC4E','\uD83D\uDC4C','\uD83E\uDD19','\uD83D\uDC4B','\uD83E\uDD1D','\uD83D\uDE4F','\uD83D\uDCAA',
+  '\uD83D\uDC4F','\uD83E\uDD26','\uD83E\uDD37','\uD83D\uDE4C','\uD83D\uDC40','\uD83D\uDC80','\uD83C\uDF89','\uD83D\uDD25',
+  '\u2764\uFE0F','\uD83E\uDDE1','\uD83D\uDC9B','\uD83D\uDC9A','\uD83D\uDC99','\uD83D\uDC9C','\uD83D\uDDA4','\uD83D\uDC94',
+  '\uD83D\uDCAF','\u2705','\u274C','\u26A0\uFE0F','\u2753','\u2757','\uD83D\uDCA1','\uD83D\uDD17',
+  '\uD83D\uDCCE','\uD83D\uDCCB','\uD83D\uDCC1','\uD83D\uDCE7','\uD83D\uDCDE','\uD83D\uDDA5\uFE0F','\u2328\uFE0F','\uD83D\uDDB1\uFE0F',
+  '\uD83D\uDD12','\uD83D\uDD13','\uD83D\uDD11','\u2B50','\uD83D\uDE80','\uD83D\uDED1','\u2714\uFE0F','\u27A1\uFE0F'
 ];
 
 const RECENT_EMOJI_KEY = 'bracerChat_recentEmojis';
@@ -1511,7 +1323,6 @@ function closeEmojiPicker() {
 function openEmojiPicker() {
   renderRecentEmojis();
   elEmojiPicker.classList.add('visible');
-  // Delay outside-click listener by one tick so the opening click doesn't trigger it
   setTimeout(() => {
     document.addEventListener('click', onOutsideClick);
   }, 0);
@@ -1524,21 +1335,6 @@ function onOutsideClick(e) {
   }
 }
 
-/**
- * Convert a Unicode emoji to its Twemoji CDN SVG URL.
- * Strips variation selector U+FE0F; preserves ZWJ (U+200D) for compound emojis.
- */
-function emojiToTwemojiUrl(emoji) {
-  const cps = [];
-  for (const char of emoji) {
-    const cp = char.codePointAt(0);
-    if (cp === 0xFE0F) continue; // variation selector — excluded from filename
-    cps.push(cp.toString(16));
-  }
-  const code = cps.join('-');
-  return `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/${code}.svg`;
-}
-
 function makeEmojiBtn(emoji) {
   const btn = document.createElement('button');
   btn.textContent = emoji;
@@ -1546,10 +1342,8 @@ function makeEmojiBtn(emoji) {
   return btn;
 }
 
-// Build the grid once
 for (const emoji of EMOJIS) {
   const btn = makeEmojiBtn(emoji);
-  // Use mousedown + preventDefault so the textarea doesn't lose focus/cursor position
   btn.addEventListener('mousedown', (e) => {
     e.preventDefault();
     insertAtCursor(elMsgInput, emoji);
@@ -1582,7 +1376,6 @@ const elSearchNext  = document.getElementById('search-next');
 let searchMarks = [];
 let searchIdx   = -1;
 
-/** Remove all <mark> elements created by the last search, restoring original text nodes. */
 function clearSearchMarks() {
   for (const mark of searchMarks) {
     const parent = mark.parentNode;
@@ -1594,7 +1387,6 @@ function clearSearchMarks() {
   searchIdx   = -1;
 }
 
-/** Walk a DOM subtree and wrap every occurrence of `query` (lowercase) in a <mark>. */
 function walkAndMark(node, query) {
   if (node.nodeType === Node.TEXT_NODE) {
     const text  = node.textContent;
@@ -1623,7 +1415,6 @@ function walkAndMark(node, query) {
   for (const child of Array.from(node.childNodes)) walkAndMark(child, query);
 }
 
-/** Highlight the match at `idx` and scroll it into view. */
 function activateMatch(idx) {
   for (const m of searchMarks) m.classList.remove('active');
   if (idx < 0 || idx >= searchMarks.length) return;
@@ -1700,15 +1491,15 @@ const elBtnExport = document.getElementById('btn-export');
 
 async function exportChat() {
   elBtnExport.disabled = true;
-  elBtnExport.textContent = 'Exporting…';
+  elBtnExport.textContent = 'Exporting\u2026';
   try {
     const bubbles = elMessages.querySelectorAll('.message, .broadcast-message');
     const rows = [];
     for (const b of bubbles) {
       if (b.classList.contains('search-hidden')) continue;
-      const ev      = b._matrixEvent;
-      const sender  = ev ? senderLabel(ev.sender) : '';
-      const time    = ev ? formatTime(ev.origin_server_ts) : '';
+      const msg     = b._message;
+      const sender  = msg ? senderLabel(msg) : '';
+      const time    = msg ? formatTime(msg.ts) : '';
       const bodyEl  = b.querySelector('.body, .broadcast-body');
       const bodyTxt = bodyEl ? bodyEl.innerText : '';
       const isBcast = b.classList.contains('broadcast-message');
@@ -1729,7 +1520,7 @@ async function exportChat() {
 
     const html = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
-<title>Bracer Chat Export — ${escHtml(hostname)}</title>
+<title>Bracer Chat Export \u2014 ${escHtml(hostname)}</title>
 <style>
   body { font-family: Segoe UI, Arial, sans-serif; font-size: 13px; color: #212121; margin: 24px; }
   h1 { font-size: 16px; color: #E65100; }

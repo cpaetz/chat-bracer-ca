@@ -4,6 +4,8 @@
  * preload.js
  * Exposes a narrow, typed API to the renderer via contextBridge.
  * The renderer has no direct access to Node.js or Electron internals.
+ *
+ * Rocket.Chat edition: message objects use { _id, msg, ts, u, attachments, tmid }
  */
 
 const { contextBridge, ipcRenderer } = require('electron');
@@ -11,56 +13,50 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('bracerChat', {
 
   // ── Session ────────────────────────────────────────────────────────────
-  /** @returns {Promise<{userId, machineRoomId, broadcastRoomId, companyRoomId, hostname, windowsUser}>} */
+  /** @returns {Promise<{userId, username, machineRoomId, broadcastRoomId, companyRoomId, hostname, windowsUser, companyName}>} */
   getSessionInfo: () => ipcRenderer.invoke('get-session-info'),
 
   // ── Chat ───────────────────────────────────────────────────────────────
-  /** @returns {Promise<object[]>} Array of Matrix timeline events (chronological) */
+  /** @returns {Promise<object[]>} Array of RC message objects (chronological) */
   getRoomHistory: (roomId, sinceTs) => ipcRenderer.invoke('get-room-history', roomId, sinceTs),
 
-  /** @returns {Promise<void>} */
+  /** @returns {Promise<object>} The sent RC message object */
   sendMessage: (roomId, text) => ipcRenderer.invoke('send-message', roomId, text),
 
-  /** Send a reply to a specific Matrix event. @returns {Promise<void>} */
-  sendReply: (roomId, text, replyToEvent) => ipcRenderer.invoke('send-reply', roomId, text, replyToEvent),
+  /** Send a reply in a thread. @param {object} replyToMsg RC message being replied to */
+  sendReply: (roomId, text, replyToMsg) => ipcRenderer.invoke('send-reply', roomId, text, replyToMsg),
 
   /**
-   * @param {string}      roomId
-   * @param {ArrayBuffer} fileData
-   * @param {string}      fileName
-   * @param {string}      mimeType
-   * @returns {Promise<void>}
+   * Upload and send a file to a room.
+   * @returns {Promise<{fileUrl, fileName, mimeType}>}
    */
   sendFile: (roomId, fileData, fileName, mimeType) =>
     ipcRenderer.invoke('send-file', roomId, fileData, fileName, mimeType),
 
-  /**
-   * Opens a native file picker dialog and returns the file data.
-   * @returns {Promise<{data: ArrayBuffer, name: string, mimeType: string}|null>} null if cancelled
-   */
+  /** Opens a native file picker dialog and returns the file data. */
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
 
-  /** Returns display layout instantly (no capture) — used to show the picker immediately. */
+  /** Returns display layout instantly (no capture). */
   getScreenLayout: () => ipcRenderer.invoke('get-screen-layout'),
 
-  /** Returns all connected displays with bounds and thumbnails for the screen picker. */
+  /** Returns all connected displays with bounds and thumbnails. */
   getScreens: () => ipcRenderer.invoke('get-screens'),
 
-  /** Captures the selected screen (by sourceId) and sends as m.image. @returns {Promise<void>} */
+  /** Captures the selected screen and sends as an image. @returns {Promise<{fileUrl, fileName}>} */
   sendScreenshot: (roomId, sourceId) => ipcRenderer.invoke('send-screenshot', roomId, sourceId),
 
   // ── Media ──────────────────────────────────────────────────────────────
-  /** Convert mxc:// URI → https:// download URL. @returns {string|null} */
-  resolveMediaUrl: (mxcUri) => ipcRenderer.invoke('resolve-media-url', mxcUri),
+  /** Resolve a file URL to a base64 data URL (cached). @returns {Promise<string|null>} */
+  resolveMediaUrl: (mediaUri) => ipcRenderer.invoke('resolve-media-url', mediaUri),
 
   /** Open a URL in the system default browser (https:// only). */
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
-  /** Download a Matrix media file (with auth) and open it with the OS. */
-  downloadFile: (mxcUri, fileName) => ipcRenderer.invoke('download-file', mxcUri, fileName),
+  /** Download a file (with auth) and show Save As dialog. */
+  downloadFile: (mediaUri, fileName) => ipcRenderer.invoke('download-file', mediaUri, fileName),
 
-  /** Open an image in the default OS photo app (temp file, no Save As). */
-  openImageInApp: (mxcUri, fileName) => ipcRenderer.invoke('open-image-in-app', mxcUri, fileName),
+  /** Open an image in the default OS photo app (temp file). */
+  openImageInApp: (mediaUri, fileName) => ipcRenderer.invoke('open-image-in-app', mediaUri, fileName),
 
   /** Write text to the system clipboard. */
   clipboardWrite: (text) => ipcRenderer.invoke('clipboard-write', text),
@@ -71,74 +67,65 @@ contextBridge.exposeInMainWorld('bracerChat', {
   /** Show a Save As dialog and write text content to the chosen file. */
   saveTextFile: (opts) => ipcRenderer.invoke('save-text-file', opts),
 
-  /** Submit a vote on a Matrix poll. */
-  sendPollResponse: (roomId, pollEventId, answerId) =>
-    ipcRenderer.invoke('send-poll-response', roomId, pollEventId, answerId),
-
   /** Show a native Cut/Copy/Paste context menu (for text inputs). */
   showInputContextMenu: () => ipcRenderer.send('show-input-context-menu'),
 
   /** Read clipboard image via Electron native API. Returns base64 PNG string or null. */
   readClipboardImage: () => ipcRenderer.invoke('read-clipboard-image'),
 
-  /** Called when the context menu Paste triggers an image paste. Receives base64 PNG string. */
+  /** Called when the context menu Paste triggers an image paste. */
   onPasteClipboardImage: (callback) => {
     ipcRenderer.on('paste-clipboard-image', (_event, b64) => callback(b64));
   },
 
-  /** Fetch a single Matrix event by ID. @returns {Promise<object|null>} */
-  getRoomEvent: (roomId, eventId) => ipcRenderer.invoke('get-room-event', roomId, eventId),
+  /** Fetch a single RC message by ID. @returns {Promise<object|null>} */
+  getRoomEvent: (roomId, messageId) => ipcRenderer.invoke('get-room-event', roomId, messageId),
 
-  /** Fetch pinned event IDs from Matrix m.room.pinned_events state. @returns {Promise<string[]>} */
+  /** Fetch pinned messages from RC. @returns {Promise<object[]>} */
   getPinnedEvents: (roomId) => ipcRenderer.invoke('get-pinned-events', roomId),
 
-  /** Set pinned event IDs in Matrix. Returns false if insufficient power level. @returns {Promise<boolean>} */
+  /** Pin a message by ID. @returns {Promise<boolean>} */
+  pinMessage: (messageId) => ipcRenderer.invoke('pin-message', messageId),
+
+  /** Unpin a message by ID. @returns {Promise<boolean>} */
+  unpinMessage: (messageId) => ipcRenderer.invoke('unpin-message', messageId),
+
+  /** Legacy: set-pinned-events (kept for backward compat). */
   setPinnedEvents: (roomId, pinnedIds) => ipcRenderer.invoke('set-pinned-events', roomId, pinnedIds),
 
   // ── Window pin ─────────────────────────────────────────────────────────
-  /** @returns {Promise<{pinned: boolean, bounds?: object}>} */
   getPinState: () => ipcRenderer.invoke('get-pin-state'),
-
-  /** Save or clear the pinned window position. @param {boolean} pinned */
   setPinState: (pinned) => ipcRenderer.invoke('set-pin-state', pinned),
 
   // ── Events ─────────────────────────────────────────────────────────────
-  /** Register a callback for new messages pushed from the sync loop. */
+  /** Register a callback for new messages from DDP WebSocket. */
   onNewMessage: (callback) => {
     ipcRenderer.on('new-message', (_event, data) => callback(data));
   },
 
-  /** Remove all new-message listeners (call before re-registering). */
   offNewMessage: () => {
     ipcRenderer.removeAllListeners('new-message');
   },
 
-  /**
-   * Called when the window is shown because a new message arrived.
-   * Renderer should expand pinned panel and scroll to the message.
-   */
+  /** Called when the window is shown because a new message arrived. */
   onFocusMessage: (callback) => {
     ipcRenderer.on('focus-message', (_event, data) => callback(data));
   },
 
-  /**
-   * Called when session room IDs are updated after init (e.g. broadcast room
-   * alias resolution). Renderer should update its cached sessionInfo.
-   */
+  /** Called when session room IDs are updated. */
   onSessionUpdate: (callback) => {
     ipcRenderer.on('session-update', (_event, data) => callback(data));
   },
 
   // ── Typing indicators ─────────────────────────────────────────────────
-  /** Send typing notification. @param {boolean} typing */
   sendTyping: (roomId, typing) => ipcRenderer.invoke('send-typing', roomId, typing),
 
-  /** Register a callback for typing updates. Called with { roomId, userIds }. */
+  /** Register a callback for typing updates. Called with { roomId, usernames }. */
   onTypingUpdate: (callback) => {
     ipcRenderer.on('typing-update', (_event, data) => callback(data));
   },
 
   // ── Read receipts ─────────────────────────────────────────────────────
-  /** Send a read receipt for the latest viewed event. */
-  sendReadReceipt: (roomId, eventId) => ipcRenderer.invoke('send-read-receipt', roomId, eventId)
+  /** Mark a room as read. */
+  sendReadReceipt: (roomId) => ipcRenderer.invoke('send-read-receipt', roomId)
 });

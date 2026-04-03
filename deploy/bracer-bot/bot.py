@@ -130,8 +130,9 @@ async def webhook(request: Request):
     is_bot = payload.get("bot", False)
     message_id = payload.get("message_id", "")
 
-    # RC webhook includes file attachments in the message object
-    # For outgoing webhooks, attachments come in a different structure
+    # RC outgoing webhooks do NOT include file attachment data in the payload.
+    # If the message has no text, it's likely a file upload — fetch the full
+    # message via REST API to get the attachment URLs.
     attachments = payload.get("attachments") or []
     file_url = ""
     if attachments:
@@ -142,6 +143,23 @@ async def webhook(request: Request):
             if att.get("title_link"):
                 file_url = att["title_link"]
                 break
+
+    # Fallback: if no text and no attachments in webhook, fetch full message from API
+    if not body and not file_url and message_id:
+        try:
+            full_msg = await _rc_get_message(message_id)
+            if full_msg:
+                for att in (full_msg.get("attachments") or []):
+                    if att.get("image_url"):
+                        file_url = att["image_url"]
+                        break
+                    if att.get("title_link"):
+                        file_url = att["title_link"]
+                        break
+                if not body:
+                    body = (full_msg.get("msg") or "").strip()
+        except Exception as exc:
+            log.warning(f"Failed to fetch full message {message_id}: {exc}")
 
     # Ignore bot messages and our own messages
     if is_bot or user_name == BOT_USERNAME:
@@ -477,6 +495,20 @@ def _rc_admin_headers() -> dict:
         "X-User-Id": RC_ADMIN_USER_ID,
         "Content-Type": "application/json",
     }
+
+
+async def _rc_get_message(message_id: str) -> dict | None:
+    """Fetch a full message by ID via admin API (includes attachments)."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{RC_URL}/api/v1/chat.getMessage",
+            params={"msgId": message_id},
+            headers=_rc_admin_headers(),
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("message")
+    return None
 
 
 async def _send(room_id: str, text: str, delay: float = 1.5):

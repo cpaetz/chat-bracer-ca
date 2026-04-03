@@ -2,7 +2,7 @@
 
 /**
  * media-cache.js
- * Encrypted local cache for Matrix media (images, files).
+ * Encrypted local cache for chat media (images, files).
  *
  * Cache dir  : C:\ProgramData\BracerChat\MediaCache\
  * Key file   : C:\ProgramData\BracerChat\media-cache.key  (32 random bytes, generated once)
@@ -43,8 +43,8 @@ function getKey() {
 
 // ── Cache path ──────────────────────────────────────────────────────────────
 
-function getCachePath(mxcUri) {
-  const hash = crypto.createHash('sha256').update(mxcUri).digest('hex');
+function getCachePath(mediaUri) {
+  const hash = crypto.createHash('sha256').update(mediaUri).digest('hex');
   return path.join(CACHE_DIR, hash);
 }
 
@@ -53,8 +53,8 @@ function getCachePath(mxcUri) {
 /**
  * Returns { buffer, mimeType } if a valid non-expired cache entry exists, else null.
  */
-function readCache(mxcUri) {
-  const filePath = getCachePath(mxcUri);
+function readCache(mediaUri) {
+  const filePath = getCachePath(mediaUri);
   try {
     const stat = fs.statSync(filePath);
     if (Date.now() - stat.mtimeMs > TTL_MS) {
@@ -88,7 +88,7 @@ function readCache(mxcUri) {
 /**
  * Encrypts and writes media to the cache.
  */
-function writeCache(mxcUri, buffer, mimeType) {
+function writeCache(mediaUri, buffer, mimeType) {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -103,7 +103,7 @@ function writeCache(mxcUri, buffer, mimeType) {
     header.writeUInt16LE(mimeBytes.length, 0);
 
     const out = Buffer.concat([header, mimeBytes, iv, authTag, cipher]);
-    fs.writeFileSync(getCachePath(mxcUri), out, { mode: 0o600 });
+    fs.writeFileSync(getCachePath(mediaUri), out, { mode: 0o600 });
   } catch (err) {
     console.warn('[media-cache] Write failed:', err.message);
   }

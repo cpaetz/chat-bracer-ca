@@ -7,7 +7,7 @@
  * - Uploads on startup if the log file has changed since last upload
  * - Uploads every hour if the log has changed
  * - Tracks last-uploaded mtime in C:\ProgramData\BracerChat\.log_upload_mtime
- * - Auth: machine's Matrix access_token (same as session.dat)
+ * - Auth: machine's RC auth token (from session.dat)
  * - Server keeps 7 days of log history; older lines are purged server-side
  * - Silent — never throws or surfaces errors to the user
  */
@@ -63,7 +63,7 @@ function uploadLog(accessToken) {
       path    : '/api/logs/upload',
       method  : 'POST',
       headers : {
-        Authorization    : `Bearer ${accessToken}`,
+        'X-Machine-Token': accessToken,
         'Content-Type'   : 'application/octet-stream',
         'Content-Length' : data.length
       }
