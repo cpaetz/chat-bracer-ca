@@ -44,7 +44,7 @@ function saveLastUploadedMtime(mtime) {
   } catch (_) {}
 }
 
-function uploadLog(accessToken) {
+function uploadLog(authToken, userId) {
   try {
     const currentMtime = getLogMtime();
     if (!currentMtime) return; // log file doesn't exist yet
@@ -63,9 +63,10 @@ function uploadLog(accessToken) {
       path    : '/api/logs/upload',
       method  : 'POST',
       headers : {
-        'X-Machine-Token': accessToken,
-        'Content-Type'   : 'application/octet-stream',
-        'Content-Length' : data.length
+        'X-Auth-Token' : authToken,
+        'X-User-Id'    : userId,
+        'Content-Type' : 'application/octet-stream',
+        'Content-Length': data.length
       }
     };
 
@@ -94,14 +95,14 @@ function uploadLog(accessToken) {
 // ── Main export ─────────────────────────────────────────────────────────────
 
 /**
- * startLogUploader(accessToken)
+ * startLogUploader(authToken, userId)
  * Call once after app is ready. Uploads on startup (if changed), then hourly.
  */
-function startLogUploader(accessToken) {
+function startLogUploader(authToken, userId) {
   // Small delay on startup so the initial log write is complete before we read it
-  setTimeout(() => uploadLog(accessToken), 15_000);
+  setTimeout(() => uploadLog(authToken, userId), 15_000);
 
-  setInterval(() => uploadLog(accessToken), UPLOAD_INTERVAL);
+  setInterval(() => uploadLog(authToken, userId), UPLOAD_INTERVAL);
 }
 
 module.exports = { startLogUploader };

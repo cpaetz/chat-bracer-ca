@@ -675,7 +675,7 @@ app.on('ready', async () => {
   userPollInterval = setInterval(checkUserChange, 60_000);
 
   // 7. Log uploader ──────────────────────────────────────────────────────
-  startLogUploader(authToken);
+  startLogUploader(authToken, userId);
 });
 
 app.on('before-quit', () => {

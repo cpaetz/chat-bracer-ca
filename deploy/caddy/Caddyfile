@@ -1,81 +1,57 @@
 chat.bracer.ca {
-    # Installer Generator UI (Basic Auth required)
-    handle /installer/* {
-        basic_auth {
-            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
-        }
-        root * /var/www
-        file_server
-    }
+	# bracer-register API — specific routes only
+	handle /api/register {
+		reverse_proxy localhost:5050
+	}
+	handle /api/register/* {
+		reverse_proxy localhost:5050
+	}
+	handle /api/companies {
+		reverse_proxy localhost:5050
+	}
+	handle /api/machine/* {
+		reverse_proxy localhost:5050
+	}
+	handle /api/update/* {
+		reverse_proxy localhost:5050
+	}
+	handle /api/admin/* {
+		reverse_proxy localhost:5050
+	}
+	handle /api/logs/* {
+		reverse_proxy localhost:5050
+	}
 
-    # Installer API — generate + companies (Basic Auth required, called from UI)
-    handle /api/installer/generate {
-        basic_auth {
-            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
-        }
-        reverse_proxy 127.0.0.1:5050
-    }
+	# Admin dashboard
+	handle /admin/* {
+		reverse_proxy localhost:5050
+	}
 
-    handle /api/installer/companies {
-        basic_auth {
-            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
-        }
-        reverse_proxy 127.0.0.1:5050
-    }
+	# bracer-bot webhook
+	handle /webhook/* {
+		reverse_proxy localhost:5051
+	}
 
-    # Serve installer downloads (Basic Auth required)
-    handle /install/* {
-        basic_auth {
-            bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
-        }
-        root * /var/www
-        file_server
-    }
+	# Installer downloads (Basic Auth required)
+	handle /install/* {
+		basic_auth {
+			bracer-install $2y$14$LMeWf3vE75xk0Zb/EuODp.pJnHMymWE3Ov8MjY59XuCy10t8LmkOi
+		}
+		root * /var/www
+		file_server
+	}
 
-    # Admin dashboard (SSO-authenticated via API)
-    handle /admin/* {
-        root * /var/www
-        try_files {path} /admin/index.html
-        file_server
-    }
+	# Health check
+	handle /health {
+		reverse_proxy localhost:5050
+	}
 
-    # Admin API callback — rewrite to API path preserving query params
-    rewrite /admin/callback /api/admin/callback
-
-    # Public chat widget assets (served to bracer.ca via script tag)
-    handle /widget/* {
-        root * /var/www
-        file_server
-        header {
-            Access-Control-Allow-Origin https://bracer.ca
-            Cache-Control "public, max-age=300"
-        }
-    }
-
-    root * /var/www/element
-    file_server
-
-    # Block Synapse admin API from public access
-    respond /_synapse/admin/* 403
-
-    reverse_proxy /_matrix/* 127.0.0.1:8008
-    reverse_proxy /_synapse/* 127.0.0.1:8008
-    reverse_proxy /api/* 127.0.0.1:5050
-    reverse_proxy /health 127.0.0.1:5050
-
-    header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options SAMEORIGIN
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy strict-origin-when-cross-origin
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-    }
-
-    encode gzip
-}
-
-# Tailscale-only: full Synapse access including admin API
-http://100.99.89.118 {
-    reverse_proxy /_matrix/* 127.0.0.1:8008
-    reverse_proxy /_synapse/* 127.0.0.1:8008
+	# Rocket.Chat (catch-all — includes /api/v1/*)
+	handle {
+		reverse_proxy localhost:3000 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up Host {host}
+		}
+	}
 }
