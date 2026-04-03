@@ -1,7 +1,6 @@
 [Unit]
 Description=Bracer Registration API
-After=network.target matrix-synapse.service
-Requires=matrix-synapse.service
+After=network.target snap.rocketchat-server.rocketchat-server.service
 
 [Service]
 Type=simple

@@ -9,7 +9,8 @@ import os
 import time
 import asyncio
 from collections import defaultdict
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, urlencode
+from pathlib import Path
 
 import httpx
 import json
@@ -37,20 +38,26 @@ app.add_middleware(
     allow_credentials=False,
 )
 
-SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://localhost:8008")
-# Allow plaintext only for localhost (Synapse is on same machine); reject otherwise
-if not SYNAPSE_URL.startswith("https://") and "localhost" not in SYNAPSE_URL and "127.0.0.1" not in SYNAPSE_URL:
-    raise RuntimeError(f"SYNAPSE_URL must use HTTPS for non-localhost targets: {SYNAPSE_URL}")
-SYNAPSE_ADMIN_TOKEN = os.environ["SYNAPSE_ADMIN_TOKEN"]
+RC_URL = os.environ.get("RC_URL", "http://localhost:3000")
+RC_ADMIN_TOKEN = os.environ["RC_ADMIN_TOKEN"]
+RC_ADMIN_USER_ID = os.environ["RC_ADMIN_USER_ID"]
 API_SECRET = os.environ["API_SECRET"]
 SERVER_NAME = os.environ.get("SERVER_NAME", "chat.bracer.ca")
-BROADCAST_ROOM_ID = os.environ["BROADCAST_ROOM_ID"]
+BROADCAST_CHANNEL = os.environ.get("BROADCAST_CHANNEL", "bracer-broadcast")
 SUPEROPS_API_KEY   = os.environ["SUPEROPS_API_KEY"]
 SUPEROPS_SUBDOMAIN = "bracer"
 
-STAFF_USERS = ["@chris.paetz:chat.bracer.ca", "@teri.sauve:chat.bracer.ca"]
-BOT_USER = "@bracerbot:chat.bracer.ca"
-RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = f"https://{SERVER_NAME}/api/admin/callback"
+
+STAFF_USERNAMES = ["chris.paetz", "teri.sauve"]
+STAFF_EMAIL_MAP = {
+    "cpaetz@bracer.ca": "chris.paetz",
+    "chris.paetz@bracersystems.net": "chris.paetz",
+    "teri@bracer.ca": "teri.sauve",
+}
+BOT_USERNAME = "bracerbot"
 
 RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
@@ -96,6 +103,210 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
     if not secrets.compare_digest(credentials.credentials.encode(), API_SECRET.encode()):
         logger.warning("Invalid API token")
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _rc_admin_headers() -> dict:
+    """Return Rocket.Chat admin auth headers."""
+    return {
+        "X-Auth-Token": RC_ADMIN_TOKEN,
+        "X-User-Id": RC_ADMIN_USER_ID,
+        "Content-Type": "application/json",
+    }
+
+
+def _rc_user_headers(auth_token: str, user_id: str) -> dict:
+    """Return Rocket.Chat auth headers for a specific user."""
+    return {
+        "X-Auth-Token": auth_token,
+        "X-User-Id": user_id,
+        "Content-Type": "application/json",
+    }
+
+
+async def _rc_get_user(client: httpx.AsyncClient, username: str) -> dict | None:
+    """Look up a Rocket.Chat user by username. Returns user dict or None."""
+    resp = await client.get(
+        f"{RC_URL}/api/v1/users.info",
+        headers=_rc_admin_headers(),
+        params={"username": username},
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get("success"):
+            return data.get("user")
+    return None
+
+
+async def _rc_create_user(
+    client: httpx.AsyncClient,
+    username: str,
+    password: str,
+    name: str,
+    roles: list[str] | None = None,
+) -> dict:
+    """Create a Rocket.Chat user. Returns user dict."""
+    payload = {
+        "username": username,
+        "password": password,
+        "name": name,
+        "email": f"{username}@machine.bracer.ca",
+        "verified": True,
+        "requirePasswordChange": False,
+    }
+    if roles:
+        payload["roles"] = roles
+    resp = await client.post(
+        f"{RC_URL}/api/v1/users.create",
+        headers=_rc_admin_headers(),
+        json=payload,
+    )
+    if resp.status_code != 200 or not resp.json().get("success"):
+        logger.error(f"Failed to create user {username}: {resp.status_code} {resp.text[:300]}")
+        raise HTTPException(status_code=500, detail="Failed to create user")
+    return resp.json()["user"]
+
+
+async def _rc_update_user(
+    client: httpx.AsyncClient,
+    user_id: str,
+    **fields,
+) -> dict:
+    """Update a Rocket.Chat user. Returns user dict."""
+    resp = await client.post(
+        f"{RC_URL}/api/v1/users.update",
+        headers=_rc_admin_headers(),
+        json={"userId": user_id, "data": fields},
+    )
+    if resp.status_code != 200 or not resp.json().get("success"):
+        logger.error(f"Failed to update user {user_id}: {resp.status_code} {resp.text[:300]}")
+        raise HTTPException(status_code=500, detail="Failed to update user")
+    return resp.json()["user"]
+
+
+async def _rc_login(client: httpx.AsyncClient, username: str, password: str) -> dict:
+    """Log in to Rocket.Chat. Returns {authToken, userId}."""
+    resp = await client.post(
+        f"{RC_URL}/api/v1/login",
+        json={"user": username, "password": password},
+    )
+    if resp.status_code != 200 or not resp.json().get("status") == "success":
+        logger.error(f"Login failed for {username}: {resp.status_code} {resp.text[:300]}")
+        raise HTTPException(status_code=500, detail="Login failed")
+    data = resp.json()["data"]
+    return {"authToken": data["authToken"], "userId": data["userId"]}
+
+
+async def _rc_get_room(client: httpx.AsyncClient, room_name: str, room_type: str = "c") -> dict | None:
+    """Look up a Rocket.Chat room by name. room_type: 'c' for channel, 'p' for group.
+    Returns room dict or None."""
+    endpoint = "channels.info" if room_type == "c" else "groups.info"
+    resp = await client.get(
+        f"{RC_URL}/api/v1/{endpoint}",
+        headers=_rc_admin_headers(),
+        params={"roomName": room_name},
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get("success"):
+            return data.get("channel") or data.get("group")
+    return None
+
+
+async def _rc_create_channel(
+    client: httpx.AsyncClient,
+    name: str,
+    members: list[str] | None = None,
+    read_only: bool = False,
+) -> dict:
+    """Create a Rocket.Chat channel (public). Returns channel dict."""
+    payload = {"name": name, "readOnly": read_only}
+    if members:
+        payload["members"] = members
+    resp = await client.post(
+        f"{RC_URL}/api/v1/channels.create",
+        headers=_rc_admin_headers(),
+        json=payload,
+    )
+    if resp.status_code != 200 or not resp.json().get("success"):
+        logger.error(f"Failed to create channel {name}: {resp.status_code} {resp.text[:300]}")
+        raise HTTPException(status_code=500, detail="Failed to create channel")
+    return resp.json()["channel"]
+
+
+async def _rc_create_group(
+    client: httpx.AsyncClient,
+    name: str,
+    members: list[str] | None = None,
+    read_only: bool = False,
+) -> dict:
+    """Create a Rocket.Chat group (private). Returns group dict."""
+    payload = {"name": name, "readOnly": read_only}
+    if members:
+        payload["members"] = members
+    resp = await client.post(
+        f"{RC_URL}/api/v1/groups.create",
+        headers=_rc_admin_headers(),
+        json=payload,
+    )
+    if resp.status_code != 200 or not resp.json().get("success"):
+        logger.error(f"Failed to create group {name}: {resp.status_code} {resp.text[:300]}")
+        raise HTTPException(status_code=500, detail="Failed to create group")
+    return resp.json()["group"]
+
+
+async def _rc_invite_to_room(
+    client: httpx.AsyncClient,
+    room_id: str,
+    user_id: str,
+    room_type: str = "c",
+) -> bool:
+    """Invite a user to a room. Returns True on success."""
+    endpoint = "channels.invite" if room_type == "c" else "groups.invite"
+    resp = await client.post(
+        f"{RC_URL}/api/v1/{endpoint}",
+        headers=_rc_admin_headers(),
+        json={"roomId": room_id, "userId": user_id},
+    )
+    if resp.status_code == 200 and resp.json().get("success"):
+        return True
+    # May already be a member — not an error
+    if "already" in resp.text.lower():
+        return True
+    logger.warning(f"Invite failed: room={room_id} user={user_id}: {resp.text[:200]}")
+    return False
+
+
+async def _rc_set_moderator(
+    client: httpx.AsyncClient,
+    room_id: str,
+    user_id: str,
+    room_type: str = "c",
+) -> bool:
+    """Set a user as moderator in a room."""
+    endpoint = "channels.addModerator" if room_type == "c" else "groups.addModerator"
+    resp = await client.post(
+        f"{RC_URL}/api/v1/{endpoint}",
+        headers=_rc_admin_headers(),
+        json={"roomId": room_id, "userId": user_id},
+    )
+    return resp.status_code == 200 and resp.json().get("success", False)
+
+
+async def _rc_post_message(
+    client: httpx.AsyncClient,
+    room_id: str,
+    text: str,
+    auth_token: str | None = None,
+    user_id: str | None = None,
+) -> bool:
+    """Send a message to a room. Uses admin headers if no user auth provided."""
+    headers = _rc_user_headers(auth_token, user_id) if auth_token else _rc_admin_headers()
+    resp = await client.post(
+        f"{RC_URL}/api/v1/chat.postMessage",
+        headers=headers,
+        json={"roomId": room_id, "text": text},
+    )
+    return resp.status_code == 200 and resp.json().get("success", False)
 
 
 class RegisterRequest(BaseModel):
@@ -234,265 +445,132 @@ async def register(
     company = body.company
     company_slug = slugify(company)
     elevated = body.elevated
-    user_id = f"@{hostname}:{SERVER_NAME}"
 
     logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} ip={request.client.host}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
-
-        # 1. Create or update Matrix user (Synapse PUT /admin/v2/users is upsert)
+        # 1. Create or update RC user
         password = generate_password()
-        resp = await client.put(
-            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
-            headers=admin_headers,
-            json={
-                "password": password,
-                "displayname": hostname,
-                "admin": False,
-                "deactivated": False,
-            },
-        )
-        if resp.status_code not in (200, 201):
-            logger.error(f"Failed to provision {user_id}: {resp.status_code} {resp.text}")
-            raise HTTPException(status_code=500, detail="Failed to provision user")
+        existing = await _rc_get_user(client, hostname)
+        if existing:
+            rc_user = await _rc_update_user(client, existing["_id"], password=password, active=True)
+        else:
+            rc_user = await _rc_create_user(client, hostname, password, name=hostname)
 
-        # 2. Log in as the new user to obtain their access token
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_matrix/client/v3/login",
-            json={
-                "type": "m.login.password",
-                "identifier": {"type": "m.id.user", "user": hostname},
-                "password": password,
-                "device_id": "BRACER_CHAT",
-            },
-        )
-        if resp.status_code != 200:
-            logger.error(f"Login failed for {user_id}: {resp.text}")
-            raise HTTPException(status_code=500, detail="Login failed")
+        rc_user_id = rc_user["_id"]
 
-        login = resp.json()
-        access_token = login["access_token"]
-        device_id = login["device_id"]
+        # 2. Log in as the new user to get auth token
+        login = await _rc_login(client, hostname, password)
+        auth_token = login["authToken"]
 
-        # 3. Force-join bracer-broadcast
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{BROADCAST_ROOM_ID}",
-            headers=admin_headers,
-            json={"user_id": user_id},
-        )
-        if resp.status_code != 200:
-            logger.warning(f"bracer-broadcast join failed for {user_id}: {resp.text}")
+        # 3. Get or create broadcast channel and invite user
+        broadcast = await _rc_get_room(client, BROADCAST_CHANNEL, room_type="c")
+        if not broadcast:
+            broadcast = await _rc_create_channel(client, BROADCAST_CHANNEL, members=STAFF_USERNAMES + [BOT_USERNAME])
+        broadcast_id = broadcast["_id"]
+        await _rc_invite_to_room(client, broadcast_id, rc_user_id, room_type="c")
 
-        # 4. Get or create company broadcast room, then join
-        company_room_id = await _get_or_create_company_room(
-            client, admin_headers, company, company_slug
-        )
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{company_room_id}",
-            headers=admin_headers,
-            json={"user_id": user_id},
-        )
-        if resp.status_code != 200:
-            logger.warning(f"Company broadcast join failed for {user_id}: {resp.text}")
+        # 4. Get or create company broadcast channel and invite user
+        company_room_id = await _get_or_create_company_room(client, company, company_slug)
+        await _rc_invite_to_room(client, company_room_id, rc_user_id, room_type="c")
 
-        # 4b. If elevated, give this machine account power level 50 in company broadcast
+        # 4b. If elevated, make moderator in company broadcast
         if elevated:
-            resp = await client.put(
-                f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{company_room_id}/state/m.room.power_levels/",
-                headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-                json=await _patch_power_levels(client, company_room_id, user_id, 50),
-            )
-            if resp.status_code != 200:
-                logger.warning(f"Failed to elevate {user_id} in {company_room_id}: {resp.text}")
-            else:
-                logger.info(f"Elevated {user_id} to power level 50 in {company_room_id}")
+            if await _rc_set_moderator(client, company_room_id, rc_user_id, room_type="c"):
+                logger.info(f"Set {hostname} as moderator in company broadcast {company_room_id}")
 
         # 5. Get or create machine room
-        machine_room_id = await _get_or_create_machine_room(
-            client, admin_headers, hostname, user_id
-        )
+        machine_room_id = await _get_or_create_machine_room(client, hostname, rc_user_id)
 
     logger.info(
-        f"Complete: {user_id} broadcast={BROADCAST_ROOM_ID} "
+        f"Complete: {hostname} broadcast={broadcast_id} "
         f"company={company_room_id} machine={machine_room_id}"
     )
 
     return {
-        "user_id": user_id,
-        "access_token": access_token,
-        "device_id": device_id,
+        "user_id": rc_user_id,
+        "username": hostname,
+        "auth_token": auth_token,
         "elevated": elevated,
         "rooms": {
-            "broadcast": BROADCAST_ROOM_ID,
+            "broadcast": broadcast_id,
             "company_broadcast": company_room_id,
             "machine": machine_room_id,
         },
     }
 
 
-async def _patch_power_levels(
-    client: httpx.AsyncClient, room_id: str, user_id: str, level: int
-) -> dict:
-    """Fetch current power levels for a room and return them with user_id set to level."""
-    resp = await client.get(
-        f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/state/m.room.power_levels/",
-        headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-    )
-    pl = resp.json() if resp.status_code == 200 else {}
-    pl.setdefault("users", {})
-    pl["users"][user_id] = level
-    return pl
-
-
-async def _resolve_alias(client: httpx.AsyncClient, alias: str) -> str | None:
-    """Return room_id for a room alias, or None if not found."""
-    encoded = urlquote(alias, safe="")
-    resp = await client.get(f"{SYNAPSE_URL}/_matrix/client/v3/directory/room/{encoded}")
-    if resp.status_code == 200:
-        return resp.json()["room_id"]
-    return None
-
-
 async def _get_or_create_company_room(
     client: httpx.AsyncClient,
-    admin_headers: dict,
     company: str,
     company_slug: str,
 ) -> str:
-    alias = f"#company-{company_slug}-broadcast:{SERVER_NAME}"
-    room_id = await _resolve_alias(client, alias)
-    if room_id:
-        return room_id
+    """Get or create the company broadcast channel. Returns room_id."""
+    room_name = f"company-{company_slug}-broadcast"
 
-    resp = await client.post(
-        f"{SYNAPSE_URL}/_matrix/client/v3/createRoom",
-        headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-        json={
-            "room_alias_name": f"company-{company_slug}-broadcast",
-            "name": f"{company} \u2014 Bracer Announcements",
-            "topic": f"Announcements from Bracer Systems for {company}.",
-            "preset": "public_chat",
-            "visibility": "private",
-            "creation_content": {"m.federate": False},
-            "power_level_content_override": {
-                "ban": 50,
-                "events": {
-                    "m.room.name": 100,
-                    "m.room.power_levels": 100,
-                    "m.room.history_visibility": 100,
-                    "m.room.canonical_alias": 100,
-                    "m.room.tombstone": 100,
-                    "m.room.server_acl": 100,
-                    "m.room.encryption": 100,
-                    "m.room.topic": 50,
-                    "m.room.avatar": 50,
-                },
-                "events_default": 50,
-                "invite": 50,
-                "kick": 50,
-                "redact": 50,
-                "state_default": 50,
-                "users": {
-                    "@chris.paetz:chat.bracer.ca": 100,
-                    "@teri.sauve:chat.bracer.ca": 50,
-                    "@bracer-register:chat.bracer.ca": 100,
-                },
-                "users_default": 0,
-            },
-        },
+    # Check if channel already exists
+    room = await _rc_get_room(client, room_name, room_type="c")
+    if room:
+        return room["_id"]
+
+    # Create channel with staff as initial members
+    channel = await _rc_create_channel(
+        client,
+        name=room_name,
+        members=STAFF_USERNAMES + [BOT_USERNAME],
+        read_only=False,
     )
-    if resp.status_code != 200:
-        logger.error(f"Failed to create company room {alias}: {resp.text}")
-        raise HTTPException(status_code=500, detail="Failed to create company room")
+    room_id = channel["_id"]
 
-    room_id = resp.json()["room_id"]
-    await client.put(
-        f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/state/m.room.retention/",
-        headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-        json={"max_lifetime": RETENTION_MS},
+    # Set topic and announcement
+    await client.post(
+        f"{RC_URL}/api/v1/channels.setTopic",
+        headers=_rc_admin_headers(),
+        json={"roomId": room_id, "topic": f"Announcements from Bracer Systems for {company}."},
     )
-    # Force-join staff users so they can see and post in the room
-    for staff_user in STAFF_USERS:
-        join_resp = await client.post(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{room_id}",
-            headers=admin_headers,
-            json={"user_id": staff_user},
-        )
-        if join_resp.status_code != 200:
-            logger.warning(f"Failed to join {staff_user} to {room_id}: {join_resp.text}")
-        else:
-            logger.info(f"Joined {staff_user} to company broadcast room {room_id}")
+    await client.post(
+        f"{RC_URL}/api/v1/channels.setDescription",
+        headers=_rc_admin_headers(),
+        json={"roomId": room_id, "description": f"{company} \u2014 Bracer Announcements"},
+    )
 
-    logger.info(f"Created company broadcast room: {alias} -> {room_id}")
+    logger.info(f"Created company broadcast channel: {room_name} -> {room_id}")
     return room_id
 
 
 async def _get_or_create_machine_room(
     client: httpx.AsyncClient,
-    admin_headers: dict,
     hostname: str,
-    user_id: str,
+    machine_user_id: str,
 ) -> str:
-    alias = f"#{hostname}:{SERVER_NAME}"
-    room_id = await _resolve_alias(client, alias)
-    if room_id:
-        return room_id
+    """Get or create the private machine support group. Returns room_id."""
+    room_name = hostname
 
-    resp = await client.post(
-        f"{SYNAPSE_URL}/_matrix/client/v3/createRoom",
-        headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-        json={
-            "room_alias_name": hostname,
-            "name": f"{hostname} \u2014 Support",
-            "topic": "Bracer Systems support channel for this machine.",
-            "preset": "private_chat",
-            "visibility": "private",
-            "creation_content": {"m.federate": False},
-            "power_level_content_override": {
-                "events": {
-                    "m.room.name": 100,
-                    "m.room.power_levels": 100,
-                    "m.room.history_visibility": 100,
-                    "m.room.tombstone": 100,
-                    "m.room.server_acl": 100,
-                    "m.room.encryption": 100,
-                },
-                "events_default": 0,
-                "invite": 50,
-                "kick": 50,
-                "redact": 50,
-                "state_default": 50,
-                "users": {
-                    "@chris.paetz:chat.bracer.ca": 100,
-                    "@teri.sauve:chat.bracer.ca": 50,
-                    "@bracer-register:chat.bracer.ca": 100,
-                    user_id: 10,
-                },
-                "users_default": 0,
-            },
-            "invite": STAFF_USERS + [BOT_USER],
-        },
+    # Check if group already exists
+    room = await _rc_get_room(client, room_name, room_type="p")
+    if room:
+        return room["_id"]
+
+    # Create private group with staff + bot as members
+    group = await _rc_create_group(
+        client,
+        name=room_name,
+        members=STAFF_USERNAMES + [BOT_USERNAME],
+        read_only=False,
     )
-    if resp.status_code != 200:
-        logger.error(f"Failed to create machine room {alias}: {resp.text}")
-        raise HTTPException(status_code=500, detail="Failed to create machine room")
+    room_id = group["_id"]
 
-    room_id = resp.json()["room_id"]
-
-    # Force-join the client user (non-staff won't auto-accept invite)
+    # Set topic
     await client.post(
-        f"{SYNAPSE_URL}/_synapse/admin/v1/join/{room_id}",
-        headers=admin_headers,
-        json={"user_id": user_id},
+        f"{RC_URL}/api/v1/groups.setTopic",
+        headers=_rc_admin_headers(),
+        json={"roomId": room_id, "topic": "Bracer Systems support channel for this machine."},
     )
 
-    await client.put(
-        f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/state/m.room.retention/",
-        headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-        json={"max_lifetime": RETENTION_MS},
-    )
-    logger.info(f"Created machine room: {alias} -> {room_id}")
+    # Invite the machine user
+    await _rc_invite_to_room(client, room_id, machine_user_id, room_type="p")
+
+    logger.info(f"Created machine support group: {room_name} -> {room_id}")
     return room_id
 
 
@@ -627,66 +705,47 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
     )
 
     company_slug = slugify(company)
-    user_id = f"@{hostname}:{SERVER_NAME}"
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
-
+        # Create or update user
         password = generate_password()
-        resp = await client.put(
-            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
-            headers=admin_headers,
-            json={"password": password, "displayname": hostname, "admin": False, "deactivated": False},
-        )
-        if resp.status_code not in (200, 201):
-            raise HTTPException(status_code=500, detail="Failed to provision user")
+        existing = await _rc_get_user(client, hostname)
+        if existing:
+            await _rc_update_user(client, existing["_id"], password=password, active=True)
+            rc_user_id = existing["_id"]
+        else:
+            rc_user = await _rc_create_user(client, hostname, password, name=hostname)
+            rc_user_id = rc_user["_id"]
 
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_matrix/client/v3/login",
-            json={
-                "type": "m.login.password",
-                "identifier": {"type": "m.id.user", "user": hostname},
-                "password": password,
-                "device_id": "BRACER_CHAT",
-            },
-        )
-        if resp.status_code != 200:
-            raise HTTPException(status_code=500, detail="Login failed")
+        # Login
+        login_data = await _rc_login(client, hostname, password)
+        auth_token = login_data["authToken"]
 
-        login_data = resp.json()
-        access_token = login_data["access_token"]
-        device_id = login_data["device_id"]
+        # Broadcast channel
+        broadcast = await _rc_get_room(client, BROADCAST_CHANNEL, room_type="c")
+        if not broadcast:
+            broadcast = await _rc_create_channel(client, BROADCAST_CHANNEL, members=STAFF_USERNAMES + [BOT_USERNAME])
+        broadcast_id = broadcast["_id"]
+        await _rc_invite_to_room(client, broadcast_id, rc_user_id, room_type="c")
 
-        await client.post(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{BROADCAST_ROOM_ID}",
-            headers=admin_headers,
-            json={"user_id": user_id},
-        )
+        # Company broadcast
+        company_room_id = await _get_or_create_company_room(client, company, company_slug)
+        await _rc_invite_to_room(client, company_room_id, rc_user_id, room_type="c")
 
-        company_room_id = await _get_or_create_company_room(
-            client, admin_headers, company, company_slug
-        )
-        await client.post(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{company_room_id}",
-            headers=admin_headers,
-            json={"user_id": user_id},
-        )
-
-        machine_room_id = await _get_or_create_machine_room(
-            client, admin_headers, hostname, user_id
-        )
+        # Machine room
+        machine_room_id = await _get_or_create_machine_room(client, hostname, rc_user_id)
 
     # Invalidate token after successful claim (single-use)
     _consume_installer_token(token)
 
-    logger.info(f"Installer claim complete: {user_id}")
+    logger.info(f"Installer claim complete: {hostname}")
     return {
-        "user_id": user_id,
-        "access_token": access_token,
-        "device_id": device_id,
+        "user_id": rc_user_id,
+        "username": hostname,
+        "auth_token": auth_token,
         "elevated": False,
         "room_id_machine": machine_room_id,
-        "room_id_broadcast": BROADCAST_ROOM_ID,
+        "room_id_broadcast": broadcast_id,
         "room_id_company": company_room_id,
     }
 
@@ -852,28 +911,42 @@ async def _create_auth_alert_ticket(ip: str, count: int):
         logger.error(f"Failed to create auth alert ticket: {resp.status_code} {resp.text[:200]}")
 
 
-async def _validate_machine_token(access_token: str, client_ip: str = "unknown"):
-    """Validate a machine Matrix access token. Returns hostname string or None."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(
-            f"{SYNAPSE_URL}/_matrix/client/v3/account/whoami",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    if resp.status_code != 200:
+async def _validate_machine_token(request: Request, client_ip: str = "unknown"):
+    """Validate machine RC auth from request headers. Returns hostname string or None.
+    Expects: Authorization: Bearer <authToken>:<userId> (combined format)
+    or X-Auth-Token + X-User-Id headers."""
+    auth_token = request.headers.get("X-Auth-Token", "")
+    user_id = request.headers.get("X-User-Id", "")
+
+    # Also support Bearer token format: "Bearer <authToken>:<userId>"
+    if not auth_token:
+        bearer = request.headers.get("Authorization", "")
+        if bearer.startswith("Bearer ") and ":" in bearer[7:]:
+            parts = bearer[7:].split(":", 1)
+            auth_token, user_id = parts[0], parts[1]
+        elif bearer.startswith("Bearer "):
+            auth_token = bearer[7:]
+
+    if not auth_token or not user_id:
         await _track_auth_failure(client_ip)
         return None
-    user_id = resp.json().get("user_id", "")
-    # Expected format: @hostname:chat.bracer.ca
-    if not user_id.startswith("@") or ":" not in user_id:
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{RC_URL}/api/v1/me",
+            headers=_rc_user_headers(auth_token, user_id),
+        )
+    if resp.status_code != 200 or not resp.json().get("success", False):
+        await _track_auth_failure(client_ip)
         return None
-    hostname = user_id[1:].split(":")[0]
+    username = resp.json().get("username", "")
     # Reject staff/bot accounts
-    if "." in hostname or hostname in ("bracerbot", "bracer-register"):
+    if "." in username or username in ("bracerbot", "bracer-register"):
         return None
-    # Path traversal guard: re-validate hostname before using in file paths
-    if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", hostname):
+    # Path traversal guard
+    if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", username):
         return None
-    return hostname
+    return username
 
 
 def _filter_log_lines(content: bytes) -> bytes:
@@ -897,12 +970,8 @@ def _filter_log_lines(content: bytes) -> bytes:
 
 @app.get("/api/update/check")
 async def update_check(request: Request):
-    """Return the current app version and update type. Requires a valid Bearer token."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization required")
-    token = auth[7:]
-    hostname = await _validate_machine_token(token, request.client.host)
+    """Return the current app version and update type. Requires valid RC auth."""
+    hostname = await _validate_machine_token(request, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     logger.info(f"Update check (authenticated): hostname={hostname}")
@@ -944,92 +1013,94 @@ class ReauthRequest(BaseModel):
 @app.post("/api/machine/reauth")
 async def machine_reauth(body: ReauthRequest, request: Request):
     """Re-authenticate a machine that lost its DPAPI credentials (user change).
-    Verifies the Matrix user exists and the serial matches the display name,
-    then resets the password and returns fresh credentials.
+    Verifies the RC user exists, resets the password, and returns fresh credentials.
     Rate limited: uses public rate limit (5/min + cooldown)."""
     hostname = body.hostname
     serial = body.serial
-    user_id = f"@{hostname}:{SERVER_NAME}"
 
     logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} ip={request.client.host}")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+    # Verify this is a machine account (no dots, not staff/bot)
+    if "." in hostname or hostname in ("bracerbot", "bracer-register"):
+        raise HTTPException(status_code=403, detail="Not a machine account")
 
-        # Verify the Matrix user exists
-        resp = await client.get(
-            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
-            headers=admin_headers,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"Reauth failed: user {user_id} not found")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Verify the RC user exists
+        existing = await _rc_get_user(client, hostname)
+        if not existing:
+            logger.warning(f"Reauth failed: user {hostname} not found")
             raise HTTPException(status_code=404, detail="Machine not registered")
 
-        # Verify this is a machine account (no dots in localpart, not staff/bot)
-        localpart = hostname
-        if "." in localpart or localpart in ("bracerbot", "bracer-register"):
-            raise HTTPException(status_code=403, detail="Not a machine account")
+        rc_user_id = existing["_id"]
 
         # Reset password and log in
         new_password = generate_password()
-        resp = await client.put(
-            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
-            headers=admin_headers,
-            json={"password": new_password},
-        )
-        if resp.status_code not in (200, 201):
-            raise HTTPException(status_code=500, detail="Password reset failed")
+        await _rc_update_user(client, rc_user_id, password=new_password)
+        login_data = await _rc_login(client, hostname, new_password)
+        auth_token = login_data["authToken"]
 
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_matrix/client/v3/login",
-            json={
-                "type": "m.login.password",
-                "identifier": {"type": "m.id.user", "user": hostname},
-                "password": new_password,
-                "device_id": "BRACER_CHAT",
-            },
-        )
-        if resp.status_code != 200:
-            raise HTTPException(status_code=500, detail="Login failed")
+        # Look up rooms via admin API (reliable, no subscription propagation delay)
+        machine_room_data = await _rc_get_room(client, hostname, room_type="p")
+        machine_room = machine_room_data["_id"] if machine_room_data else None
 
-        login_data = resp.json()
-        access_token = login_data["access_token"]
-        device_id = login_data["device_id"]
+        broadcast_data = await _rc_get_room(client, BROADCAST_CHANNEL, room_type="c")
+        broadcast_room = broadcast_data["_id"] if broadcast_data else None
 
-        # Look up the machine's rooms
-        resp = await client.get(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/users/{user_id}/joined_rooms",
-            headers=admin_headers,
-        )
-        room_ids = resp.json().get("joined_rooms", []) if resp.status_code == 200 else []
-
-        machine_room = None
-        broadcast_room = BROADCAST_ROOM_ID
+        # Find company room: list user's channels, find company-*-broadcast
         company_room = None
+        resp = await client.get(
+            f"{RC_URL}/api/v1/channels.list.joined",
+            headers=_rc_user_headers(auth_token, login_data["userId"]),
+            params={"count": 100},
+        )
+        if resp.status_code == 200 and resp.json().get("success"):
+            for ch in resp.json().get("channels", []):
+                rname = ch.get("name", "")
+                if rname.startswith("company-") and rname.endswith("-broadcast"):
+                    company_room = ch["_id"]
+                    break
 
-        for room_id in room_ids:
-            resp2 = await client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{room_id}",
-                headers=admin_headers,
+        # Fallback: if channels.list.joined didn't work, search via admin API
+        if not company_room:
+            resp = await client.get(
+                f"{RC_URL}/api/v1/users.info",
+                headers=_rc_admin_headers(),
+                params={"userId": rc_user_id},
             )
-            if resp2.status_code == 200:
-                alias = resp2.json().get("canonical_alias") or ""
-                if alias == f"#{hostname}:{SERVER_NAME}":
-                    machine_room = room_id
-                elif alias.startswith("#company-"):
-                    company_room = room_id
+            if resp.status_code == 200 and resp.json().get("success"):
+                # Check rooms the user belongs to via admin rooms endpoint
+                rooms_resp = await client.get(
+                    f"{RC_URL}/api/v1/rooms.adminRooms",
+                    headers=_rc_admin_headers(),
+                    params={"filter": "company-", "types[]": "c", "count": 200},
+                )
+                if rooms_resp.status_code == 200 and rooms_resp.json().get("success"):
+                    for room in rooms_resp.json().get("rooms", []):
+                        rname = room.get("name", "")
+                        if rname.startswith("company-") and rname.endswith("-broadcast"):
+                            # Check if user is a member
+                            mem_resp = await client.get(
+                                f"{RC_URL}/api/v1/channels.members",
+                                headers=_rc_admin_headers(),
+                                params={"roomId": room["_id"], "count": 500},
+                            )
+                            if mem_resp.status_code == 200:
+                                members = [m.get("username") for m in mem_resp.json().get("members", [])]
+                                if hostname in members:
+                                    company_room = room["_id"]
+                                    break
 
     if not machine_room:
         logger.warning(f"Reauth: could not find machine room for {hostname}")
 
-    logger.info(f"Reauth complete: {user_id} ip={request.client.host}")
+    logger.info(f"Reauth complete: {hostname} ip={request.client.host}")
     return {
-        "user_id": user_id,
-        "access_token": access_token,
-        "device_id": device_id,
+        "user_id": rc_user_id,
+        "username": hostname,
+        "auth_token": auth_token,
         "elevated": False,
         "room_id_machine": machine_room or "",
-        "room_id_broadcast": broadcast_room,
+        "room_id_broadcast": broadcast_room or "",
         "room_id_company": company_room or "",
     }
 
@@ -1037,12 +1108,8 @@ async def machine_reauth(body: ReauthRequest, request: Request):
 @app.get("/api/update/asar")
 async def update_asar(request: Request):
     """Stream the latest app.asar (legacy endpoint — updates now pushed via SuperOps).
-    Requires a valid machine Matrix access token."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    token    = auth[7:]
-    hostname = await _validate_machine_token(token, request.client.host)
+    Requires valid RC auth."""
+    hostname = await _validate_machine_token(request, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -1066,12 +1133,8 @@ async def update_asar(request: Request):
 @app.get("/api/update/download")
 async def update_download(request: Request):
     """Stream the latest installer EXE (legacy endpoint — updates now pushed via SuperOps).
-    Requires a valid machine Matrix access token."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    token    = auth[7:]
-    hostname = await _validate_machine_token(token, request.client.host)
+    Requires valid RC auth."""
+    hostname = await _validate_machine_token(request, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -1132,148 +1195,86 @@ class GuestStartRequest(BaseModel):
 
 @app.post("/api/guest/start")
 async def guest_start(request: Request, body: GuestStartRequest):
-    """Create a temporary guest Matrix account and support room for the website chat widget."""
+    """Create a temporary guest RC account and support room for the website chat widget."""
     guest_id_suffix = secrets.token_hex(8)
-    guest_localpart = f"guest-{guest_id_suffix}"
-    user_id = f"@{guest_localpart}:{SERVER_NAME}"
+    guest_username = f"guest-{guest_id_suffix}"
     display_name = body.name
 
     logger.info(f"Guest chat start: name={display_name} ip={request.client.host}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
-
-        # 1. Create guest Matrix user
+        # 1. Create guest RC user
         password = generate_password()
-        resp = await client.put(
-            f"{SYNAPSE_URL}/_synapse/admin/v2/users/{user_id}",
-            headers=admin_headers,
-            json={
-                "password": password,
-                "displayname": display_name,
-                "admin": False,
-                "deactivated": False,
-            },
+        guest_user = await _rc_create_user(client, guest_username, password, name=display_name)
+        guest_user_id = guest_user["_id"]
+
+        # 2. Log in as guest to get auth token
+        login = await _rc_login(client, guest_username, password)
+        auth_token = login["authToken"]
+
+        # 3. Create a private group for guest support
+        group_name = f"guest-chat-{guest_id_suffix}"
+        group = await _rc_create_group(
+            client,
+            name=group_name,
+            members=STAFF_USERNAMES + [BOT_USERNAME],
         )
-        if resp.status_code not in (200, 201):
-            logger.error(f"Failed to create guest {user_id}: {resp.status_code} {resp.text}")
-            raise HTTPException(status_code=500, detail="Failed to start chat session")
+        room_id = group["_id"]
 
-        # 2. Log in as guest to get access token
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_matrix/client/v3/login",
-            json={
-                "type": "m.login.password",
-                "identifier": {"type": "m.id.user", "user": guest_localpart},
-                "password": password,
-                "device_id": f"GUEST_{guest_id_suffix.upper()}",
-            },
-        )
-        if resp.status_code != 200:
-            logger.error(f"Guest login failed for {user_id}: {resp.text}")
-            raise HTTPException(status_code=500, detail="Failed to start chat session")
-
-        login = resp.json()
-        access_token = login["access_token"]
-
-        # 3. Create a private support room
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_matrix/client/v3/createRoom",
-            headers=admin_headers,
-            json={
-                "name": f"Website Chat — {display_name}",
-                "topic": "Live chat from bracer.ca website",
-                "preset": "private_chat",
-                "visibility": "private",
-                "creation_content": {"m.federate": False},
-                "power_level_content_override": {
-                    "events": {
-                        "m.room.name": 100,
-                        "m.room.power_levels": 100,
-                        "m.room.history_visibility": 100,
-                        "m.room.tombstone": 100,
-                        "m.room.server_acl": 100,
-                        "m.room.encryption": 100,
-                    },
-                    "events_default": 0,
-                    "invite": 50,
-                    "kick": 50,
-                    "redact": 50,
-                    "state_default": 50,
-                    "users": {
-                        "@chris.paetz:chat.bracer.ca": 100,
-                        "@teri.sauve:chat.bracer.ca": 50,
-                        "@bracer-register:chat.bracer.ca": 100,
-                        user_id: 10,
-                    },
-                    "users_default": 0,
-                },
-                "invite": STAFF_USERS + [BOT_USER],
-            },
-        )
-        if resp.status_code != 200:
-            logger.error(f"Failed to create guest room: {resp.text}")
-            raise HTTPException(status_code=500, detail="Failed to create chat room")
-
-        room_id = resp.json()["room_id"]
-
-        # 4. Force-join guest to the room
+        # Set topic
         await client.post(
-            f"{SYNAPSE_URL}/_synapse/admin/v1/join/{room_id}",
-            headers=admin_headers,
-            json={"user_id": user_id},
+            f"{RC_URL}/api/v1/groups.setTopic",
+            headers=_rc_admin_headers(),
+            json={"roomId": room_id, "topic": f"Website Chat \u2014 {display_name}"},
         )
 
-        # 5. Set 1-hour retention on the room
-        await client.put(
-            f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/state/m.room.retention/",
-            headers=admin_headers,
-            json={"max_lifetime": GUEST_ROOM_RETENTION_MS},
-        )
+        # 4. Invite guest to the room
+        await _rc_invite_to_room(client, room_id, guest_user_id, room_type="p")
 
-    # 6. Track the session for cleanup
+    # 5. Track the session for cleanup
     now = time.time()
     db = sqlite3.connect(GUEST_DB)
     db.execute(
         "INSERT OR REPLACE INTO guest_sessions VALUES (?, ?, ?, ?)",
-        (user_id, room_id, now, now),
+        (guest_username, room_id, now, now),
     )
     db.commit()
     db.close()
 
-    logger.info(f"Guest chat ready: {user_id} room={room_id}")
+    logger.info(f"Guest chat ready: {guest_username} room={room_id}")
     return {
-        "user_id": user_id,
-        "access_token": access_token,
+        "user_id": guest_user_id,
+        "username": guest_username,
+        "auth_token": auth_token,
         "room_id": room_id,
-        "homeserver": f"https://{SERVER_NAME}",
+        "server_url": f"https://{SERVER_NAME}",
     }
 
 
 @app.post("/api/guest/heartbeat")
 async def guest_heartbeat(request: Request):
     """Update last_activity timestamp for a guest session. Called periodically by widget."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    auth_token = request.headers.get("X-Auth-Token", "")
+    user_id = request.headers.get("X-User-Id", "")
+    if not auth_token or not user_id:
         raise HTTPException(status_code=401, detail="Missing token")
-    token = auth[7:]
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(
-            f"{SYNAPSE_URL}/_matrix/client/v3/account/whoami",
-            headers={"Authorization": f"Bearer {token}"},
+            f"{RC_URL}/api/v1/me",
+            headers=_rc_user_headers(auth_token, user_id),
         )
-    if resp.status_code != 200:
+    if resp.status_code != 200 or not resp.json().get("success", False):
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user_id = resp.json().get("user_id", "")
-    if not user_id.startswith("@guest-"):
+    username = resp.json().get("username", "")
+    if not username.startswith("guest-"):
         raise HTTPException(status_code=403, detail="Not a guest session")
 
     db = sqlite3.connect(GUEST_DB)
     db.execute(
         "UPDATE guest_sessions SET last_activity = ? WHERE user_id = ?",
-        (time.time(), user_id),
+        (time.time(), username),
     )
     db.commit()
     db.close()
@@ -1282,12 +1283,8 @@ async def guest_heartbeat(request: Request):
 
 @app.post("/api/logs/upload")
 async def logs_upload(request: Request):
-    """Receive a machine error log. Requires a valid machine Matrix access token."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    token    = auth[7:]
-    hostname = await _validate_machine_token(token, request.client.host)
+    """Receive a machine error log. Requires valid RC auth."""
+    hostname = await _validate_machine_token(request, request.client.host)
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -1386,63 +1383,91 @@ async def _validate_admin_session(request: Request, check_csrf: bool = False) ->
 
 
 @app.get("/api/admin/login")
-async def admin_login(provider: str = ""):
-    """Redirect to Synapse SSO login. Optional provider param: 'google' or 'microsoft'."""
-    callback = f"https://{SERVER_NAME}/admin/callback"
-    if provider == "google":
-        sso_url = f"https://{SERVER_NAME}/_matrix/client/v3/login/sso/redirect/oidc-google?redirectUrl={callback}"
-    elif provider == "microsoft":
-        sso_url = f"https://{SERVER_NAME}/_matrix/client/v3/login/sso/redirect/oidc-microsoft?redirectUrl={callback}"
-    else:
-        sso_url = f"https://{SERVER_NAME}/_matrix/client/v3/login/sso/redirect?redirectUrl={callback}"
-    return RedirectResponse(url=sso_url)
+async def admin_login():
+    """Redirect to Google OAuth consent screen for admin dashboard login."""
+    state = secrets.token_hex(16)
+    params = urlencode({
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "online",
+        "state": state,
+        "prompt": "select_account",
+    })
+    return RedirectResponse(url=f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
 
 
 @app.get("/api/admin/callback")
-async def admin_callback(loginToken: str = ""):
-    """Handle SSO callback — exchange loginToken for access_token, validate staff, set cookie."""
-    if not loginToken:
-        raise HTTPException(status_code=400, detail="Missing loginToken")
+async def admin_callback(request: Request, code: str = "", error: str = ""):
+    """Handle Google OAuth callback — exchange code for token, log into RC, create session."""
 
-    # Exchange loginToken for access_token
+    if error:
+        logger.warning(f"Google OAuth error: {error}")
+        return RedirectResponse(url="/admin/?error=oauth_denied")
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            f"{SYNAPSE_URL}/_matrix/client/v3/login",
-            json={
-                "type": "m.login.token",
-                "token": loginToken,
+        # Step 1: Exchange auth code for Google access token
+        token_resp = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
             },
         )
-    if resp.status_code != 200:
-        logger.warning(f"Admin SSO login failed: {resp.status_code} {resp.text[:200]}")
-        raise HTTPException(status_code=401, detail="SSO login failed")
+        if token_resp.status_code != 200:
+            logger.warning(f"Google token exchange failed: {token_resp.status_code} {token_resp.text[:200]}")
+            return RedirectResponse(url="/admin/?error=token_exchange")
 
-    login_data = resp.json()
-    user_id = login_data.get("user_id", "")
-    access_token = login_data.get("access_token", "")
+        google_data = token_resp.json()
+        google_access_token = google_data.get("access_token", "")
+        if not google_access_token:
+            logger.warning("Google token exchange returned no access_token")
+            return RedirectResponse(url="/admin/?error=no_token")
 
-    # Check if user is staff
-    if user_id not in STAFF_USERS:
-        logger.warning(f"Admin login rejected: {user_id} is not staff")
-        # Logout the token we just created
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{SYNAPSE_URL}/_matrix/client/v3/logout",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-        raise HTTPException(status_code=403, detail="Access denied — staff only")
+        # Step 2: Get user's Google profile (email + name)
+        userinfo_resp = await client.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {google_access_token}"},
+        )
+        if userinfo_resp.status_code != 200:
+            logger.warning(f"Google userinfo failed: {userinfo_resp.status_code}")
+            return RedirectResponse(url="/admin/?error=userinfo")
 
-    # Create admin session
+        google_profile = userinfo_resp.json()
+        google_email = google_profile.get("email", "").lower()
+        google_name = google_profile.get("name", google_email)
+
+        if not google_email:
+            logger.warning("Google userinfo returned no email")
+            return RedirectResponse(url="/admin/?error=no_email")
+
+        # Step 3: Map Google email to RC username and check staff status
+        # Staff emails: cpaetz@bracer.ca -> chris.paetz, teri@bracer.ca -> teri.sauve, etc.
+        username = STAFF_EMAIL_MAP.get(google_email, "")
+
+    if not username or username not in STAFF_USERNAMES:
+        logger.warning(f"Admin login rejected: {google_email} is not a staff email")
+        return RedirectResponse(url="/admin/?error=access_denied")
+
+    # Create admin session (uses admin RC token for API calls, not per-user)
     session_id = secrets.token_hex(32)
     csrf_token = secrets.token_hex(32)
     ADMIN_SESSION_STORE[session_id] = {
-        "user_id": user_id,
-        "access_token": access_token,
+        "user_id": username,
+        "google_email": google_email,
+        "google_name": google_name,
         "expires": time.time() + ADMIN_SESSION_TTL,
         "csrf_token": csrf_token,
     }
 
-    logger.info(f"Admin login: {user_id}")
+    logger.info(f"Admin login: {username}")
     response = RedirectResponse(url="/admin/", status_code=303)
     response.set_cookie(
         key="bcw_admin",
@@ -1452,7 +1477,6 @@ async def admin_callback(loginToken: str = ""):
         samesite="lax",
         max_age=ADMIN_SESSION_TTL,
     )
-    # CSRF token cookie — readable by JS (not httponly) for double-submit pattern
     response.set_cookie(
         key="bcw_csrf",
         value=csrf_token,
@@ -1469,16 +1493,21 @@ async def admin_logout(request: Request):
     """Log out admin session."""
     session_id = request.cookies.get("bcw_admin")
     if session_id and session_id in ADMIN_SESSION_STORE:
-        session = ADMIN_SESSION_STORE.pop(session_id)
-        # Logout the Matrix token
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{SYNAPSE_URL}/_matrix/client/v3/logout",
-                headers={"Authorization": f"Bearer {session['access_token']}"},
-            )
+        ADMIN_SESSION_STORE.pop(session_id)
     response = JSONResponse({"ok": True})
     response.delete_cookie("bcw_admin")
+    response.delete_cookie("bcw_csrf")
     return response
+
+
+@app.get("/admin/")
+@app.get("/admin")
+async def admin_dashboard():
+    """Serve the admin dashboard HTML."""
+    html_path = Path(__file__).parent / "admin" / "index.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Admin dashboard not found")
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 
 @app.get("/api/admin/status")
@@ -1486,88 +1515,107 @@ async def admin_status(request: Request):
     """Return dashboard status: online clients, holiday config, companies."""
     user_id = await _validate_admin_session(request)
 
-    admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
-
-    # Get all users with their last_seen timestamp
-    online_machines = []
     companies = {}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         # Fetch all users (paginated)
         users = []
-        from_token = "0"
+        offset = 0
         while True:
             resp = await client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v2/users?from={from_token}&limit=100&guests=false",
-                headers=admin_headers,
+                f"{RC_URL}/api/v1/users.list",
+                headers=_rc_admin_headers(),
+                params={"count": 100, "offset": offset},
             )
             if resp.status_code != 200:
                 break
             data = resp.json()
             users.extend(data.get("users", []))
-            next_token = data.get("next_token")
-            if not next_token:
+            if offset + 100 >= data.get("total", 0):
                 break
-            from_token = str(next_token)
+            offset += 100
 
-        # Filter to machine accounts (no dots in localpart, not staff/bot/guest)
-        now_ms = int(time.time() * 1000)
-        five_min_ms = 5 * 60 * 1000
+        now = time.time()
 
         for user in users:
-            uid = user.get("name", "")
-            localpart = uid.split(":")[0][1:] if ":" in uid else ""
+            username = user.get("username", "")
 
-            # Skip staff, bot, guest, and registration accounts
-            if "." in localpart or localpart.startswith("guest-"):
+            # Skip staff, bot, guest, and service accounts
+            if "." in username or username.startswith("guest-"):
                 continue
-            if localpart in ("bracerbot", "bracer-register"):
+            if username in ("bracerbot", "bracer-register", "admin"):
+                continue
+            if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", username):
                 continue
 
-            last_seen = user.get("last_seen_ts") or 0
-            is_online = (now_ms - last_seen) < five_min_ms if last_seen else False
+            # RC stores lastLogin and status
+            last_login = user.get("lastLogin", "")
+            status = user.get("status", "offline")
+            is_online = status in ("online", "away")
 
             machine_info = {
-                "hostname": localpart,
-                "user_id": uid,
+                "hostname": username,
+                "user_id": user.get("_id", ""),
                 "online": is_online,
-                "last_seen": last_seen,
-                "displayname": user.get("displayname", localpart),
+                "last_seen": last_login,
+                "displayname": user.get("name", username),
             }
 
-            # Look up company + machine room via joined rooms
+            # Look up rooms via admin rooms API
             company_name = None
             company_room = None
             machine_room = None
+
             resp2 = await client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v1/users/{uid}/joined_rooms",
-                headers=admin_headers,
+                f"{RC_URL}/api/v1/channels.list.joined",
+                headers=_rc_admin_headers(),
+                params={"count": 200},
             )
-            if resp2.status_code == 200:
-                for room_id in resp2.json().get("joined_rooms", []):
-                    resp3 = await client.get(
-                        f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{room_id}",
-                        headers=admin_headers,
-                    )
-                    if resp3.status_code == 200:
-                        rdata = resp3.json()
-                        alias = rdata.get("canonical_alias") or ""
-                        if alias.startswith("#company-"):
-                            company_room = room_id
-                            rname = rdata.get("name", "")
-                            for sep in (" \u2014 ", " \u2013 ", " - "):
-                                if sep in rname:
-                                    company_name = rname.split(sep)[0].strip()
-                                    break
-                            if not company_name:
-                                company_name = rname.strip()
-                        elif alias == f"#{localpart}:{SERVER_NAME}":
-                            machine_room = room_id
+            # For machine rooms (groups), we need to look up by name
+            machine_room_data = await _rc_get_room(client, username, room_type="p")
+            if machine_room_data:
+                machine_room = machine_room_data["_id"]
+
+            # Find company room by checking user's subscriptions via admin
+            resp3 = await client.get(
+                f"{RC_URL}/api/v1/subscriptions.getAll",
+                headers=_rc_admin_headers(),
+            )
+            # Alternative: look for company rooms that contain this user
+            # For now, derive company from room naming convention
+            resp4 = await client.get(
+                f"{RC_URL}/api/v1/rooms.adminRooms",
+                headers=_rc_admin_headers(),
+                params={"filter": f"company-", "types[]": "c", "count": 200},
+            )
+            if resp4.status_code == 200 and resp4.json().get("success"):
+                for room in resp4.json().get("rooms", []):
+                    rname = room.get("name", "")
+                    if rname.startswith("company-") and rname.endswith("-broadcast"):
+                        # Check if this user is a member
+                        resp5 = await client.get(
+                            f"{RC_URL}/api/v1/channels.members",
+                            headers=_rc_admin_headers(),
+                            params={"roomId": room["_id"], "count": 500},
+                        )
+                        if resp5.status_code == 200:
+                            members = resp5.json().get("members", [])
+                            if any(m.get("username") == username for m in members):
+                                company_room = room["_id"]
+                                # Derive company name from room description or name
+                                desc = room.get("description", "")
+                                if desc:
+                                    company_name = desc.split(" \u2014 ")[0].strip() if " \u2014 " in desc else desc
+                                else:
+                                    # Parse from room name: company-slug-broadcast -> slug
+                                    slug = rname.replace("company-", "").replace("-broadcast", "")
+                                    company_name = slug.replace("-", " ").title()
+                                break
 
             machine_info["company"] = company_name or "Unknown"
             machine_info["machine_room"] = machine_room
             machine_info["company_room"] = company_room
-            machine_info["created_at"] = user.get("creation_ts", 0)
+            machine_info["created_at"] = user.get("createdAt", "")
 
             co_key = company_name or "Unknown"
             if co_key not in companies:
@@ -1577,12 +1625,16 @@ async def admin_status(request: Request):
                     "machines": [],
                     "online_count": 0,
                 }
-            companies[machine_info["company"]]["machines"].append(machine_info)
+            companies[co_key]["machines"].append(machine_info)
             if is_online:
-                companies[machine_info["company"]]["online_count"] += 1
+                companies[co_key]["online_count"] += 1
 
     holiday = _load_holiday_config()
     autoresponder = _load_autoresponder_config()
+
+    # Get broadcast channel ID
+    broadcast = await _rc_get_room(httpx.AsyncClient(timeout=10.0), BROADCAST_CHANNEL, room_type="c")
+    broadcast_id = broadcast["_id"] if broadcast else ""
 
     total_machines = sum(len(c["machines"]) for c in companies.values())
     total_online = sum(c["online_count"] for c in companies.values())
@@ -1594,7 +1646,7 @@ async def admin_status(request: Request):
         "total_machines": total_machines,
         "total_online": total_online,
         "companies": dict(sorted(companies.items(), key=lambda x: x[0].lower())),
-        "broadcast_room_id": BROADCAST_ROOM_ID,
+        "broadcast_room_id": broadcast_id,
     }
 
 
@@ -1638,9 +1690,6 @@ async def admin_autoresponder(request: Request):
 async def admin_broadcast(request: Request):
     """Send a broadcast message to a company room or all clients."""
     user_id = await _validate_admin_session(request, check_csrf=True)
-    session_id = request.cookies.get("bcw_admin")
-    session = ADMIN_SESSION_STORE.get(session_id, {})
-    access_token = session.get("access_token", "")
 
     body = await request.json()
     message = str(body.get("message", "")).strip()
@@ -1651,50 +1700,34 @@ async def admin_broadcast(request: Request):
     if len(message) > 2000:
         raise HTTPException(status_code=400, detail="Message too long (max 2000 chars)")
 
-    # Validate target: must be "all" or a known company broadcast room
-    if target != "all":
-        # Verify the room exists and is a company room by checking its alias
-        async with httpx.AsyncClient(timeout=10.0) as check_client:
-            resp = await check_client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{target}",
-                headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
-            )
-            if resp.status_code != 200:
-                logger.warning(f"Broadcast target validation failed: room {target} not found (by {user_id})")
-                raise HTTPException(status_code=400, detail="Invalid target room")
-            room_data = resp.json()
-            alias = room_data.get("canonical_alias") or ""
-            if not alias.startswith(f"#company-") or not alias.endswith(f":{SERVER_NAME}"):
-                logger.warning(f"Broadcast target rejected: {target} alias={alias} (by {user_id})")
-                raise HTTPException(status_code=403, detail="Target is not a company broadcast room")
-
     rooms_sent = []
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         if target == "all":
-            # Send to bracer-broadcast (all clients)
-            resp = await client.put(
-                f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{BROADCAST_ROOM_ID}/send/m.room.message/{secrets.token_hex(8)}",
-                headers={"Authorization": f"Bearer {access_token}"},
-                json={"msgtype": "m.text", "body": message},
-            )
-            if resp.status_code == 200:
-                rooms_sent.append(BROADCAST_ROOM_ID)
+            # Send to bracer-broadcast channel (uses admin token)
+            broadcast = await _rc_get_room(client, BROADCAST_CHANNEL, room_type="c")
+            if not broadcast:
+                raise HTTPException(status_code=500, detail="Broadcast channel not found")
+            if await _rc_post_message(client, broadcast["_id"], message):
+                rooms_sent.append(broadcast["_id"])
             else:
-                logger.error(f"Broadcast to all failed: {resp.status_code} {resp.text[:200]}")
                 raise HTTPException(status_code=500, detail="Failed to send broadcast")
         else:
-            # Send to validated company room
-            room_id = target
-            resp = await client.put(
-                f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{secrets.token_hex(8)}",
-                headers={"Authorization": f"Bearer {access_token}"},
-                json={"msgtype": "m.text", "body": message},
+            # Validate target is a company broadcast room
+            resp = await client.get(
+                f"{RC_URL}/api/v1/channels.info",
+                headers=_rc_admin_headers(),
+                params={"roomId": target},
             )
-            if resp.status_code == 200:
-                rooms_sent.append(room_id)
+            if resp.status_code != 200 or not resp.json().get("success"):
+                raise HTTPException(status_code=400, detail="Invalid target room")
+            room_name = resp.json().get("channel", {}).get("name", "")
+            if not room_name.startswith("company-") or not room_name.endswith("-broadcast"):
+                raise HTTPException(status_code=403, detail="Target is not a company broadcast room")
+
+            if await _rc_post_message(client, target, message):
+                rooms_sent.append(target)
             else:
-                logger.error(f"Broadcast to {room_id} failed: {resp.status_code} {resp.text[:200]}")
                 raise HTTPException(status_code=500, detail="Failed to send message")
 
     logger.info(f"Broadcast by {user_id}: target={target} rooms={len(rooms_sent)}")
@@ -1711,8 +1744,8 @@ async def admin_messages(
     """Fetch messages from a machine support room within a time window for the conversation viewer."""
     await _validate_admin_session(request)
 
-    if not room_id.startswith("!"):
-        raise HTTPException(status_code=400, detail="room_id must start with '!'")
+    if not room_id:
+        raise HTTPException(status_code=400, detail="room_id is required")
     if from_ts <= 0 or to_ts <= 0:
         raise HTTPException(status_code=400, detail="from_ts and to_ts are required")
     if from_ts >= to_ts:
@@ -1720,85 +1753,59 @@ async def admin_messages(
     if to_ts - from_ts > 86_400_000:
         raise HTTPException(status_code=400, detail="Time window cannot exceed 24 hours")
 
-    admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
-    bot_user = f"@bracerbot:{SERVER_NAME}"
     MAX_MESSAGES = 500
-
-    collected = []
-    truncated = False
-    end_token = None
+    from_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(from_ts / 1000))
+    to_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(to_ts / 1000))
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Paginate backward to collect events in the window
-        while True:
-            url = f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{urlquote(room_id, safe='')}/messages?dir=b&limit=100"
-            if end_token:
-                url += f"&from={end_token}"
+        # RC groups.history for private rooms
+        resp = await client.get(
+            f"{RC_URL}/api/v1/groups.history",
+            headers=_rc_admin_headers(),
+            params={
+                "roomId": room_id,
+                "oldest": from_iso,
+                "latest": to_iso,
+                "count": MAX_MESSAGES,
+            },
+        )
+        if resp.status_code != 200 or not resp.json().get("success"):
+            # Try channels.history as fallback
+            resp = await client.get(
+                f"{RC_URL}/api/v1/channels.history",
+                headers=_rc_admin_headers(),
+                params={
+                    "roomId": room_id,
+                    "oldest": from_iso,
+                    "latest": to_iso,
+                    "count": MAX_MESSAGES,
+                },
+            )
+            if resp.status_code != 200 or not resp.json().get("success"):
+                raise HTTPException(status_code=502, detail="Failed to fetch messages")
 
-            resp = await client.get(url, headers=admin_headers)
-            if resp.status_code != 200:
-                logger.warning(f"admin_messages: Synapse error {resp.status_code} for room {room_id}")
-                raise HTTPException(status_code=502, detail="Failed to fetch messages from Synapse")
+        rc_messages = resp.json().get("messages", [])
 
-            data = resp.json()
-            chunk = data.get("chunk", [])
-            end_token = data.get("end")
-
-            stop_early = False
-            for event in chunk:
-                ts = event.get("origin_server_ts", 0)
-                if ts < from_ts:
-                    stop_early = True
-                    break
-                if ts > to_ts:
-                    continue
-                if event.get("type") != "m.room.message":
-                    continue
-                content = event.get("content", {})
-                if content.get("msgtype") != "m.text":
-                    continue
-                if event.get("sender", "") == bot_user:
-                    continue
-                collected.append(event)
-                if len(collected) >= MAX_MESSAGES:
-                    truncated = True
-                    stop_early = True
-                    break
-
-            if stop_early or not chunk or not end_token:
-                break
-
-        # Resolve display names once per unique sender
-        display_names: dict = {}
-        for event in collected:
-            sender = event.get("sender", "")
-            if sender not in display_names:
-                resp = await client.get(
-                    f"{SYNAPSE_URL}/_synapse/admin/v2/users/{urlquote(sender, safe='')}",
-                    headers=admin_headers,
-                )
-                if resp.status_code == 200:
-                    display_names[sender] = resp.json().get("displayname") or sender
-                else:
-                    display_names[sender] = sender
-
-    # Sort ascending by timestamp before returning
-    collected.sort(key=lambda e: e.get("origin_server_ts", 0))
-
+    # Filter out bot messages, build response
     messages = []
-    for event in collected:
-        ts_ms = event.get("origin_server_ts", 0)
-        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts_ms / 1000))
-        sender = event.get("sender", "")
+    for msg in rc_messages:
+        sender = msg.get("u", {})
+        if sender.get("username") == BOT_USERNAME:
+            continue
+        ts = msg.get("ts", "")
         messages.append({
-            "timestamp": ts_iso,
-            "sender_display": display_names.get(sender, sender),
-            "sender_id": sender,
-            "body": event.get("content", {}).get("body", ""),
-            "event_id": event.get("event_id", ""),
+            "timestamp": ts,
+            "sender_display": sender.get("name", sender.get("username", "")),
+            "sender_id": sender.get("_id", ""),
+            "body": msg.get("msg", ""),
+            "event_id": msg.get("_id", ""),
         })
 
-    logger.info(f"admin_messages: room={room_id} from={from_ts} to={to_ts} count={len(messages)} truncated={truncated}")
+    # RC returns newest first — reverse for chronological order
+    messages.reverse()
+    truncated = len(rc_messages) >= MAX_MESSAGES
+
+    logger.info(f"admin_messages: room={room_id} count={len(messages)} truncated={truncated}")
     return {"messages": messages, "truncated": truncated}
 
 
@@ -1830,130 +1837,85 @@ async def admin_unreplied(request: Request):
     """Return count and list of machine rooms with unreplied client messages."""
     await _validate_admin_session(request)
 
-    admin_headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
     dismiss_state = _load_dismiss_state()
     unreplied_rooms = []
-    display_name_cache: dict = {}
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Fetch all users (paginated)
-        users = []
-        from_token = "0"
-        while True:
-            resp = await client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v2/users?from={from_token}&limit=100&guests=false",
-                headers=admin_headers,
-            )
-            if resp.status_code != 200:
-                break
-            data = resp.json()
-            users.extend(data.get("users", []))
-            next_token = data.get("next_token")
-            if not next_token:
-                break
-            from_token = str(next_token)
+        # Get all private groups (machine rooms are private groups named after hostnames)
+        resp = await client.get(
+            f"{RC_URL}/api/v1/rooms.adminRooms",
+            headers=_rc_admin_headers(),
+            params={"types[]": "p", "count": 500},
+        )
+        if resp.status_code != 200 or not resp.json().get("success"):
+            return {"unreplied_count": 0, "unreplied_rooms": []}
 
-        for user in users:
-            uid = user.get("name", "")
-            localpart = uid.split(":")[0][1:] if ":" in uid else ""
+        rooms = resp.json().get("rooms", [])
 
-            # Skip staff, bot, guest, and registration accounts
-            if "." in localpart or localpart.startswith("guest-"):
+        for room in rooms:
+            room_name = room.get("name", "")
+            room_id = room.get("_id", "")
+
+            # Skip non-machine rooms (guest rooms, etc.)
+            if room_name.startswith("guest-"):
                 continue
-            if localpart in ("bracerbot", "bracer-register"):
+            if "." in room_name:
+                continue
+            if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,62}[a-zA-Z0-9])?$", room_name):
                 continue
 
-            machine_room = None
-            company_name = None
-
-            # Find machine room and company name via joined rooms
+            # Get recent messages
             resp2 = await client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v1/users/{uid}/joined_rooms",
-                headers=admin_headers,
+                f"{RC_URL}/api/v1/groups.history",
+                headers=_rc_admin_headers(),
+                params={"roomId": room_id, "count": 20},
             )
-            if resp2.status_code == 200:
-                for room_id in resp2.json().get("joined_rooms", []):
-                    resp3 = await client.get(
-                        f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{room_id}",
-                        headers=admin_headers,
-                    )
-                    if resp3.status_code == 200:
-                        rdata = resp3.json()
-                        alias = rdata.get("canonical_alias") or ""
-                        if alias.startswith("#company-") and company_name is None:
-                            rname = rdata.get("name", "")
-                            for sep in (" \u2014 ", " \u2013 ", " - "):
-                                if sep in rname:
-                                    company_name = rname.split(sep)[0].strip()
-                                    break
-                            if not company_name:
-                                company_name = rname.strip()
-                        elif alias == f"#{localpart}:{SERVER_NAME}":
-                            machine_room = room_id
-
-            if not machine_room:
+            if resp2.status_code != 200 or not resp2.json().get("success"):
                 continue
 
-            # Get recent messages from machine room to find last non-bot m.text event
-            resp4 = await client.get(
-                f"{SYNAPSE_URL}/_synapse/admin/v1/rooms/{urlquote(machine_room, safe='')}/messages?dir=b&limit=20",
-                headers=admin_headers,
-            )
-            if resp4.status_code != 200:
-                continue
+            messages = resp2.json().get("messages", [])
 
-            last_event = None
-            for event in resp4.json().get("chunk", []):
-                if event.get("type") != "m.room.message":
+            # Find last non-bot message
+            last_msg = None
+            for msg in messages:
+                sender_username = msg.get("u", {}).get("username", "")
+                if sender_username == BOT_USERNAME:
                     continue
-                if event.get("content", {}).get("msgtype") != "m.text":
-                    continue
-                if event.get("sender", "") == BOT_USER:
-                    continue
-                last_event = event
+                last_msg = msg
                 break
 
-            if not last_event:
-                # No non-bot m.text message found — nothing to reply to
+            if not last_msg:
                 continue
 
-            last_sender = last_event.get("sender", "")
-            if last_sender in STAFF_USERS:
-                # Last real message was from staff — already replied
+            last_sender_username = last_msg.get("u", {}).get("username", "")
+            if last_sender_username in STAFF_USERNAMES:
+                # Staff already replied
                 continue
 
-            event_id = last_event.get("event_id", "")
-            # Check dismiss state: dismissed if event_id matches stored dismiss
-            dismissed = dismiss_state.get(machine_room, {})
-            if dismissed.get("event_id") == event_id:
+            msg_id = last_msg.get("_id", "")
+            # Check dismiss state
+            dismissed = dismiss_state.get(room_id, {})
+            if dismissed.get("event_id") == msg_id:
                 continue
 
-            # Resolve display name (cached per sender)
-            if last_sender not in display_name_cache:
-                resp5 = await client.get(
-                    f"{SYNAPSE_URL}/_synapse/admin/v2/users/{urlquote(last_sender, safe='')}",
-                    headers=admin_headers,
-                )
-                if resp5.status_code == 200:
-                    display_name_cache[last_sender] = resp5.json().get("displayname") or last_sender
-                else:
-                    display_name_cache[last_sender] = last_sender
-
-            ts_ms = last_event.get("origin_server_ts", 0)
-            ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts_ms / 1000))
+            # Derive company name from room members' company room membership
+            company_name = "Unknown"
+            # Simple heuristic: check if there's a company room for this machine
+            # by looking at room metadata or user subscriptions
+            # For now, leave as Unknown — will be enriched later
 
             unreplied_rooms.append({
-                "room_id": machine_room,
-                "machine_hostname": localpart,
-                "company": company_name or "Unknown",
-                "last_message_from": display_name_cache[last_sender],
-                "last_message_sender_id": last_sender,
-                "last_message_body": last_event.get("content", {}).get("body", ""),
-                "last_message_time": ts_iso,
-                "last_message_event_id": event_id,
+                "room_id": room_id,
+                "machine_hostname": room_name,
+                "company": company_name,
+                "last_message_from": last_msg.get("u", {}).get("name", last_sender_username),
+                "last_message_sender_id": last_msg.get("u", {}).get("_id", ""),
+                "last_message_body": last_msg.get("msg", ""),
+                "last_message_time": last_msg.get("ts", ""),
+                "last_message_event_id": msg_id,
             })
 
-    unreplied_rooms.sort(key=lambda r: r["last_message_time"])
+    unreplied_rooms.sort(key=lambda r: r.get("last_message_time", ""))
     logger.info(f"admin_unreplied: {len(unreplied_rooms)} unreplied rooms")
     return {"unreplied_count": len(unreplied_rooms), "unreplied_rooms": unreplied_rooms}
 
@@ -1968,10 +1930,10 @@ async def admin_unreplied_dismiss(request: Request, body: DismissRequest):
     """Mark a room's current unreplied message as dismissed."""
     await _validate_admin_session(request)
 
-    if not body.room_id.startswith("!"):
-        raise HTTPException(status_code=400, detail="room_id must start with '!'")
-    if not body.event_id.startswith("$"):
-        raise HTTPException(status_code=400, detail="event_id must start with '$'")
+    if not body.room_id:
+        raise HTTPException(status_code=400, detail="room_id is required")
+    if not body.event_id:
+        raise HTTPException(status_code=400, detail="event_id is required")
 
     state = _load_dismiss_state()
     state[body.room_id] = {

@@ -1,7 +1,6 @@
 [Unit]
 Description=Bracer Support Bot
-After=network.target matrix-synapse.service
-Requires=matrix-synapse.service
+After=network.target snap.rocketchat-server.rocketchat-server.service
 
 [Service]
 Type=simple
@@ -10,8 +9,7 @@ Group=bracer-bot
 WorkingDirectory=/opt/bracer-bot
 EnvironmentFile=/opt/bracer-bot/.token-env
 EnvironmentFile=/opt/bracer-bot/.env.plain
-EnvironmentFile=/opt/bracer-bot/.env.secrets
-ExecStart=op run --env-file=/opt/bracer-bot/.env.op -- /opt/bracer-bot/venv/bin/python bot.py
+ExecStart=op run --env-file=/opt/bracer-bot/.env.op -- /opt/bracer-bot/venv/bin/uvicorn bot:app --host 127.0.0.1 --port 5051 --no-access-log
 Restart=always
 RestartSec=5
 NoNewPrivileges=yes

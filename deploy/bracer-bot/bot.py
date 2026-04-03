@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-bracer-bot — Bracer Systems support bot for Matrix chat.
+bracer-bot — Bracer Systems support bot for Rocket.Chat.
 
-Phase 5 of Bracer Chat project.
-Python + matrix-nio (async), systemd service on chat-bracer-ca.
+Phase 3 of Bracer Chat v2 (RC migration).
+Python + FastAPI webhook receiver, systemd service on bracer-chat-rc.
+
+Architecture:
+  RC outgoing webhook -> POST /webhook -> dispatch by message type
+  Bot replies via RC REST API (chat.postMessage)
 
 Behaviour:
   - Greets on first client message per room (business-hours-aware)
-  - !ticket → SuperOps ticket flow (3 questions + screenshot, 10-min timeout)
-  - !cancel → cancels active ticket flow (works for both clients and staff)
+  - !ticket -> SuperOps ticket flow (3 questions + screenshot, 10-min timeout)
+  - !cancel -> cancels active ticket flow (works for both clients and staff)
   - Never responds to staff or itself
-  - Only joins rooms created by bracer-register
+  - Captures diagnostic responses from Electron app for ticket enrichment
 """
 
 import asyncio
@@ -23,18 +27,22 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-import aiohttp
-from nio import AsyncClient, AsyncClientConfig, JoinedMembersResponse, LoginResponse, RoomMessageText, RoomMessageImage, RoomMessageNotice, SyncResponse
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-MATRIX_HOMESERVER   = os.environ.get("MATRIX_HOMESERVER", "http://localhost:8008")
-BOT_USER_ID         = os.environ.get("BOT_USER_ID", "@bracerbot:chat.bracer.ca")
-BOT_PASSWORD        = os.environ["BOT_PASSWORD"]
-STAFF_USERS         = set(filter(None, os.environ.get("STAFF_USERS", "").split(",")))
+RC_URL              = os.environ.get("RC_URL", "http://localhost:3000")
+RC_BOT_TOKEN        = os.environ["RC_BOT_TOKEN"]
+RC_BOT_USER_ID      = os.environ["RC_BOT_USER_ID"]
+RC_ADMIN_TOKEN      = os.environ.get("RC_ADMIN_TOKEN", "")
+RC_ADMIN_USER_ID    = os.environ.get("RC_ADMIN_USER_ID", "")
+RC_WEBHOOK_TOKEN    = os.environ.get("RC_WEBHOOK_TOKEN", "")
+BOT_USERNAME        = os.environ.get("BOT_USERNAME", "bracerbot")
+STAFF_USERNAMES     = set(filter(None, os.environ.get("STAFF_USERNAMES", "chris.paetz,teri.sauve").split(",")))
 SUPEROPS_API_KEY    = os.environ["SUPEROPS_API_KEY"]
 SUPEROPS_SUBDOMAIN  = os.environ.get("SUPEROPS_SUBDOMAIN", "bracer")
-SYNAPSE_ADMIN_TOKEN = os.environ.get("SYNAPSE_ADMIN_TOKEN", "")
 DB_PATH             = os.environ.get("DB_PATH", "/opt/bracer-bot/bracer_bot.db")
 
 TIMEZONE             = ZoneInfo("America/Edmonton")
@@ -50,9 +58,10 @@ AUTORESPONDER_CONFIG_PATH = "/opt/bracer-register/autoresponder.json"
 # In-memory: tracks the timestamp of the last message in each room (any sender)
 _room_last_message: dict[str, float] = {}  # room_id -> epoch seconds
 
-# In-memory: caches machine info responses per room (populated by !machineinfo reply)
+# In-memory: caches machine info responses per room (populated by diagnostic reply)
 _room_machine_info: dict[str, dict] = {}  # room_id -> {"user": ..., "serial": ..., "ip": ..., "mac": ...}
 _room_diag_text: dict[str, list] = {}  # room_id -> list of raw diag response strings
+_room_diag_events: dict[str, asyncio.Event] = {}  # room_id -> Event signalled when all 6 diag responses arrive
 
 GREETING_BUSINESS = (
     "Hi! Thanks for reaching out to Bracer Systems Support. "
@@ -80,6 +89,88 @@ GUEST_GREETING_AFTERHOURS = (
     "Otherwise, I can take a message and someone will follow up next business day. "
     "What is your name?"
 )
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+)
+log = logging.getLogger("bracer-bot")
+
+# ── FastAPI App ───────────────────────────────────────────────────────────────
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.on_event("startup")
+async def startup():
+    init_db()
+    log.info(f"bracer-bot started (RC webhook mode, bot={BOT_USERNAME})")
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "bot": BOT_USERNAME}
+
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    """Receive RC outgoing webhook — dispatch to message handlers."""
+    payload = await request.json()
+
+    # Validate webhook token
+    token = payload.get("token", "")
+    if RC_WEBHOOK_TOKEN and token != RC_WEBHOOK_TOKEN:
+        return JSONResponse(status_code=401, content={"error": "invalid token"})
+
+    # Extract fields from RC webhook payload
+    user_name = payload.get("user_name", "")
+    room_id = payload.get("channel_id", "")
+    channel_name = payload.get("channel_name", "")
+    body = (payload.get("text") or "").strip()
+    is_bot = payload.get("bot", False)
+    message_id = payload.get("message_id", "")
+
+    # RC webhook includes file attachments in the message object
+    # For outgoing webhooks, attachments come in a different structure
+    attachments = payload.get("attachments") or []
+    file_url = ""
+    if attachments:
+        for att in attachments:
+            if att.get("image_url"):
+                file_url = att["image_url"]
+                break
+            if att.get("title_link"):
+                file_url = att["title_link"]
+                break
+
+    # Ignore bot messages and our own messages
+    if is_bot or user_name == BOT_USERNAME:
+        return {"status": "ignored"}
+
+    # ── Autoresponder: check idle time BEFORE recording this message ──────
+    is_from_customer = user_name not in STAFF_USERNAMES
+    should_autorespond = is_from_customer and _should_autorespond(room_id)
+
+    # Record activity for ALL senders
+    _record_room_activity(room_id)
+
+    # ── Diagnostic response detection (replaces on_notice) ────────────────
+    if _is_diag_response(body):
+        _handle_diagnostic(room_id, body)
+        return {"status": "diag_captured"}
+
+    # ── Image attachment handling (replaces on_image) ─────────────────────
+    if file_url and not body:
+        # Pure image message (no text)
+        await _handle_image(room_id, channel_name, user_name, file_url)
+        return {"status": "ok"}
+
+    # ── Text message handling (replaces on_message) ───────────────────────
+    body = _truncate(body)
+    await _handle_message(room_id, channel_name, user_name, body,
+                          should_autorespond, file_url)
+    return {"status": "ok"}
+
 
 # ── Database ───────────────────────────────────────────────────────────────────
 
@@ -133,7 +224,9 @@ def init_db():
             conn.execute("ALTER TABLE greeted_rooms ADD COLUMN company TEXT")
         except sqlite3.OperationalError:
             pass
-        for col in ("tried TEXT", "reproduce TEXT", "when_started TEXT", "pending_ticket_id TEXT", "screenshot_mxc TEXT", "staff_triggered INTEGER DEFAULT 0", "initiating_staff TEXT"):
+        for col in ("tried TEXT", "reproduce TEXT", "when_started TEXT",
+                     "pending_ticket_id TEXT", "screenshot_mxc TEXT",
+                     "staff_triggered INTEGER DEFAULT 0", "initiating_staff TEXT"):
             try:
                 conn.execute(f"ALTER TABLE ticket_sessions ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -144,7 +237,6 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
-    # Restrict DB permissions - no world-read
     try:
         os.chmod(DB_PATH, 0o640)
     except OSError:
@@ -238,7 +330,6 @@ def clear_ticket_session(room_id: str):
 
 
 def count_recent_tickets(room_id: str) -> int:
-    """Count tickets created from this room in the last hour."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     with _db() as conn:
         row = conn.execute(
@@ -332,7 +423,7 @@ def get_holiday_message() -> str:
 
 def is_business_hours() -> bool:
     if is_holiday_mode():
-        return False  # Holiday mode = treat as after-hours
+        return False
     now = datetime.now(TIMEZONE)
     return now.weekday() < 5 and 8 <= now.hour < 17
 
@@ -348,7 +439,6 @@ def _load_autoresponder_config() -> dict:
 
 
 def _should_autorespond(room_id: str) -> bool:
-    """Return True if the room has been idle for at least delay_minutes."""
     config = _load_autoresponder_config()
     if not config.get("enabled", False):
         return False
@@ -357,7 +447,6 @@ def _should_autorespond(room_id: str) -> bool:
     delay = max(1, config.get("delay_minutes", 20))
     last_ts = _room_last_message.get(room_id)
     if last_ts is None:
-        # No prior message tracked - don't autorespond (avoids false trigger after bot restart)
         return False
     elapsed_min = (datetime.now(timezone.utc).timestamp() - last_ts) / 60.0
     return elapsed_min >= delay
@@ -369,67 +458,147 @@ def _get_autoresponder_message() -> str:
 
 
 def _record_room_activity(room_id: str):
-    """Record that a message was sent in this room (any sender)."""
     _room_last_message[room_id] = datetime.now(timezone.utc).timestamp()
 
 
-# ── Synapse admin ──────────────────────────────────────────────────────────────
+# ── RC API helpers ─────────────────────────────────────────────────────────────
 
-async def _is_bracer_room(room_id: str) -> bool:
-    """Verify room was created by @bracer-register before the bot joins."""
-    if not SYNAPSE_ADMIN_TOKEN:
-        return True
-    server = BOT_USER_ID.split(":", 1)[1]
-    expected_creator = f"@bracer-register:{server}"
-    headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
-    url = f"{MATRIX_HOMESERVER}/_synapse/admin/v1/rooms/{room_id}"
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.json(content_type=None)
-        return data.get("creator") == expected_creator
-    except Exception:
-        return False
+def _rc_bot_headers() -> dict:
+    return {
+        "X-Auth-Token": RC_BOT_TOKEN,
+        "X-User-Id": RC_BOT_USER_ID,
+        "Content-Type": "application/json",
+    }
+
+
+def _rc_admin_headers() -> dict:
+    return {
+        "X-Auth-Token": RC_ADMIN_TOKEN,
+        "X-User-Id": RC_ADMIN_USER_ID,
+        "Content-Type": "application/json",
+    }
+
+
+async def _send(room_id: str, text: str, delay: float = 1.5):
+    """Send a message to a RC room as the bot user."""
+    if delay > 0:
+        await asyncio.sleep(delay)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{RC_URL}/api/v1/chat.postMessage",
+            headers=_rc_bot_headers(),
+            json={"roomId": room_id, "text": text},
+        )
+        if resp.status_code != 200 or not resp.json().get("success"):
+            log.warning(f"Failed to send message to {room_id}: {resp.status_code} {resp.text[:200]}")
+
+
+async def _download_rc_file(file_url: str) -> tuple[bytes, str]:
+    """Download a file from Rocket.Chat. Returns (data, filename)."""
+    # file_url may be relative (/file-upload/...) or absolute
+    if file_url.startswith("/"):
+        url = f"{RC_URL}{file_url}"
+    elif file_url.startswith("http"):
+        url = file_url
+    else:
+        url = f"{RC_URL}/{file_url}"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url, headers=_rc_bot_headers())
+        if resp.status_code != 200:
+            raise RuntimeError(f"RC file download failed: {resp.status_code} for {file_url}")
+        data = resp.content
+        # Extract filename from URL path
+        filename = file_url.rsplit("/", 1)[-1] if "/" in file_url else "screenshot.png"
+        return data, filename
 
 
 async def _get_company_name(hostname: str) -> str | None:
-    """Look up company name via Synapse admin API using machine user's broadcast room."""
-    if not SYNAPSE_ADMIN_TOKEN:
-        return None
-    server = BOT_USER_ID.split(":", 1)[1]
-    machine_user = f"@{hostname}:{server}"
-    base = MATRIX_HOMESERVER
-    headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+    """Look up company name via RC admin API — find company-*-broadcast channel the user belongs to."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Get the RC user for this hostname
+        resp = await client.get(
+            f"{RC_URL}/api/v1/users.info",
+            headers=_rc_bot_headers(),
+            params={"username": hostname},
+        )
+        if resp.status_code != 200 or not resp.json().get("success"):
+            return None
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        url = f"{base}/_synapse/admin/v1/users/{machine_user}/joined_rooms"
-        async with session.get(url, headers=headers) as resp:
-            if resp.status != 200:
+        rc_user_id = resp.json()["user"]["_id"]
+
+        # Get the user's channel subscriptions
+        resp = await client.get(
+            f"{RC_URL}/api/v1/channels.list.joined",
+            headers={"X-Auth-Token": RC_BOT_TOKEN, "X-User-Id": RC_BOT_USER_ID},
+            params={"count": 200},
+        )
+        if resp.status_code != 200:
+            return None
+
+        # Search through all company broadcast channels for this user's membership
+        resp = await client.get(
+            f"{RC_URL}/api/v1/rooms.adminRooms",
+            headers=_rc_admin_headers(),
+            params={"filter": "company-", "types[]": "c", "count": 200},
+        )
+        if resp.status_code != 200 or not resp.json().get("success"):
+            return None
+
+        for room in resp.json().get("rooms", []):
+            rname = room.get("name", "")
+            if not (rname.startswith("company-") and rname.endswith("-broadcast")):
+                continue
+            # Check if the machine user is a member
+            mem_resp = await client.get(
+                f"{RC_URL}/api/v1/channels.members",
+                headers=_rc_admin_headers(),
+                params={"roomId": room["_id"], "count": 500},
+            )
+            if mem_resp.status_code == 200:
+                members = [m.get("username") for m in mem_resp.json().get("members", [])]
+                if hostname in members:
+                    # Extract company name from room display name
+                    fname = room.get("fname") or room.get("name") or ""
+                    for sep in (" \u2014 ", " \u2013 ", " - "):
+                        if sep in fname:
+                            return fname.split(sep)[0].strip()
+                    # Fallback: derive from slug
+                    slug = rname.replace("company-", "").replace("-broadcast", "")
+                    return slug.replace("-", " ").title()
+    return None
+
+
+async def _get_room_client_displayname(room_id: str) -> str | None:
+    """Return the display name of the non-staff, non-bot user in the support room."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        # Machine rooms are private groups
+        resp = await client.get(
+            f"{RC_URL}/api/v1/groups.members",
+            headers=_rc_bot_headers(),
+            params={"roomId": room_id, "count": 50},
+        )
+        if resp.status_code != 200 or not resp.json().get("success"):
+            # Try channels endpoint as fallback
+            resp = await client.get(
+                f"{RC_URL}/api/v1/channels.members",
+                headers=_rc_bot_headers(),
+                params={"roomId": room_id, "count": 50},
+            )
+            if resp.status_code != 200:
                 return None
-            data = await resp.json(content_type=None)
 
-        for room_id in data.get("joined_rooms", []):
-            url2 = f"{base}/_synapse/admin/v1/rooms/{room_id}"
-            async with session.get(url2, headers=headers) as resp:
-                if resp.status != 200:
-                    continue
-                rdata = await resp.json(content_type=None)
-            alias = rdata.get("canonical_alias") or ""
-            if alias.startswith("#company-"):
-                name = rdata.get("name") or ""
-                for sep in (" \u2014 ", " \u2013 ", " - "):
-                    if sep in name:
-                        return name.split(sep)[0].strip()
-                return name.strip() or None
+        for member in resp.json().get("members", []):
+            uname = member.get("username", "")
+            if uname == BOT_USERNAME or uname in STAFF_USERNAMES:
+                continue
+            return member.get("name") or uname
     return None
 
 
 # ── SuperOps ───────────────────────────────────────────────────────────────────
 
 async def _get_superops_client_id(company_name: str) -> str | None:
-    """Fetch SuperOps client list and find matching accountId by company name."""
     headers = {
         "authorization": f"Bearer {SUPEROPS_API_KEY}",
         "CustomerSubDomain": SUPEROPS_SUBDOMAIN,
@@ -442,19 +611,19 @@ async def _get_superops_client_id(company_name: str) -> str | None:
         }
     }
     """
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        async with session.post(SUPEROPS_GQL_URL, headers=headers, json={"query": query}) as resp:
-            data = await resp.json(content_type=None)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(SUPEROPS_GQL_URL, headers=headers, json={"query": query})
+        data = resp.json()
 
     clients = (data.get("data") or {}).get("getClientList", {}).get("clients", [])
     name_lower = company_name.lower()
-    for client in clients:
-        if (client.get("name") or "").lower() == name_lower:
-            return client["accountId"]
-    for client in clients:
-        sops_name = (client.get("name") or "").lower()
+    for c in clients:
+        if (c.get("name") or "").lower() == name_lower:
+            return c["accountId"]
+    for c in clients:
+        sops_name = (c.get("name") or "").lower()
         if name_lower in sops_name or sops_name in name_lower:
-            return client["accountId"]
+            return c["accountId"]
     return None
 
 
@@ -464,7 +633,6 @@ async def create_superops_ticket(
     priority: str,
     account_id: str | None,
 ) -> tuple[str, str]:
-    """GraphQL mutation to create a SuperOps ticket. Returns (internal_ticketId, displayId) tuple."""
     headers = {
         "authorization": f"Bearer {SUPEROPS_API_KEY}",
         "CustomerSubDomain": SUPEROPS_SUBDOMAIN,
@@ -490,13 +658,13 @@ async def create_superops_ticket(
     if account_id:
         variables["input"]["client"] = {"accountId": account_id}
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        async with session.post(
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
             SUPEROPS_GQL_URL,
             headers=headers,
             json={"query": mutation, "variables": variables},
-        ) as resp:
-            data = await resp.json(content_type=None)
+        )
+        data = resp.json()
 
     errors = data.get("errors")
     if errors:
@@ -508,46 +676,16 @@ async def create_superops_ticket(
     return internal_id, display_id
 
 
-async def _download_matrix_media(mxc_url: str) -> tuple[bytes, str]:
-    """Download media from Matrix via mxc:// URL. Returns (data, filename).
-    Uses the admin token for auth (required by Synapse v1.149+)."""
-    if not mxc_url.startswith("mxc://"):
-        raise ValueError(f"Not an mxc URL: {mxc_url}")
-    parts = mxc_url[6:].split("/", 1)
-    server_name = parts[0]
-    media_id = parts[1]
-    headers = {"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"}
+# ── Diagnostics ───────────────────────────────────────────────────────────────
 
-    urls = [
-        f"{MATRIX_HOMESERVER}/_matrix/client/v1/media/download/{server_name}/{media_id}",
-        f"{MATRIX_HOMESERVER}/_matrix/media/v3/download/{server_name}/{media_id}",
-    ]
-
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        for url in urls:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    cd = resp.headers.get("Content-Disposition", "")
-                    filename = "screenshot.png"
-                    if "filename=" in cd:
-                        filename = cd.split("filename=")[-1].strip('" ')
-                    return data, filename
-
-    raise RuntimeError(f"Media download failed for {mxc_url}: all endpoints returned non-200")
-
-
-# Known diagnostic response headers from the Electron app
 _DIAG_HEADERS = {"**Machine Info**", "**Version Info**", "**CPU / RAM**", "**Disk Info**", "**Network Interfaces**", "**Uptime**"}
 
 
 def _is_diag_response(body: str) -> bool:
-    """Check if a message is a diagnostic command response."""
     return any(h in body for h in _DIAG_HEADERS)
 
 
 def _parse_machine_info(body: str) -> dict | None:
-    """Parse a !machineinfo response into a dict."""
     if "**Machine Info**" not in body:
         return None
     info = {}
@@ -559,25 +697,35 @@ def _parse_machine_info(body: str) -> dict | None:
     return info if info else None
 
 
+def _handle_diagnostic(room_id: str, body: str):
+    """Process a diagnostic response — cache and signal if all 6 collected."""
+    parsed = _parse_machine_info(body)
+    if parsed:
+        _room_machine_info[room_id] = parsed
+        log.info(f"Cached machine info for room={room_id}: user={parsed.get('user')} serial=...{(parsed.get('serial') or '')[-6:]}")
+    if room_id not in _room_diag_text:
+        _room_diag_text[room_id] = []
+    _room_diag_text[room_id].append(body)
+    # Signal the Event if we have all 6 diagnostic responses
+    ev = _room_diag_events.get(room_id)
+    if ev and len(_room_diag_text.get(room_id, [])) >= 6:
+        ev.set()
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-async def _send(client: AsyncClient, room_id: str, text: str, delay: float = 1.5):
-    if delay > 0:
-        await asyncio.sleep(delay)
-    await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content={"msgtype": "m.text", "body": text},
-    )
+def _is_guest_sender(username: str) -> bool:
+    return username.startswith("guest-")
 
 
-def _is_guest_sender(sender: str) -> bool:
-    """Check if the sender is a guest user from the website widget."""
-    return sender.startswith("@guest-")
+def _truncate(text: str) -> str:
+    return text[:INPUT_MAX_LEN] if len(text) > INPUT_MAX_LEN else text
 
 
-async def _handle_guest_afterhours(client: AsyncClient, room, room_id: str, body: str, log):
-    """Handle the after-hours contact collection flow for guest chat visitors.
+# ── Guest after-hours flow ────────────────────────────────────────────────────
+
+async def _handle_guest_afterhours(room_id: str, body: str):
+    """Handle the after-hours contact collection flow for guest visitors.
     Returns True if the message was handled, False to fall through."""
     gsession = get_guest_session(room_id)
     if not gsession:
@@ -587,54 +735,52 @@ async def _handle_guest_afterhours(client: AsyncClient, room, room_id: str, body
 
     if state == "await_name":
         set_guest_session(room_id, "await_company", contact_name=body)
-        await _send(client, room_id, "Thanks! What company are you with?")
+        await _send(room_id, "Thanks! What company are you with?")
         return True
 
     if state == "await_company":
         set_guest_session(room_id, "await_phone", company_name=body)
-        await _send(client, room_id, "What's the best phone number to reach you?")
+        await _send(room_id, "What's the best phone number to reach you?")
         return True
 
     if state == "await_phone":
         set_guest_session(room_id, "await_message", phone=body)
-        await _send(client, room_id,
+        await _send(room_id,
             "What can we help you with? Please describe your issue and we'll include it in the ticket.")
         return True
 
     if state == "await_message":
         set_guest_session(room_id, "await_preference", message=body)
-        await _send(client, room_id,
+        await _send(room_id,
             "Would you prefer a call back or an email?\n1 = Call back\n2 = Email")
         return True
 
     if state == "await_preference":
         if body not in ("1", "2"):
-            await _send(client, room_id, "Please reply with 1 (Call back) or 2 (Email).")
+            await _send(room_id, "Please reply with 1 (Call back) or 2 (Email).")
             return True
-
         preference = "Call back" if body == "1" else "Email"
         set_guest_session(room_id, "await_screenshot_yn", preference=preference)
-        await _send(client, room_id,
-            "Do you have a screenshot of the issue? (yes/no)")
+        await _send(room_id, "Do you have a screenshot of the issue? (yes/no)")
         return True
 
     if state == "await_screenshot_yn":
         answer = body.lower().strip()
         if answer in ("yes", "y", "yeah", "yep", "sure"):
             set_guest_session(room_id, "await_screenshot")
-            await _send(client, room_id,
+            await _send(room_id,
                 "Please paste or attach your screenshot now using the attachment button.")
             return True
         elif answer in ("no", "n", "nope", "nah"):
-            return await _finalize_guest_ticket(client, room_id, log)
+            return await _finalize_guest_ticket(room_id)
         else:
-            await _send(client, room_id, "Please reply yes or no.")
+            await _send(room_id, "Please reply yes or no.")
             return True
 
     if state == "await_screenshot":
         if body.lower().strip() in ("skip", "no", "none"):
-            return await _finalize_guest_ticket(client, room_id, log)
-        await _send(client, room_id,
+            return await _finalize_guest_ticket(room_id)
+        await _send(room_id,
             "I'm waiting for a screenshot image. Please paste or attach it, "
             "or type 'skip' to create the ticket without one.")
         return True
@@ -642,8 +788,8 @@ async def _handle_guest_afterhours(client: AsyncClient, room, room_id: str, body
     return False
 
 
-async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screenshot_mxc: str = None):
-    """Create the SuperOps ticket from the collected guest contact info."""
+async def _finalize_guest_ticket(room_id: str, screenshot_url: str = None):
+    """Create the SuperOps ticket from collected guest contact info."""
     gs = get_guest_session(room_id)
     if not gs:
         return True
@@ -660,11 +806,10 @@ async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screens
     except Exception as exc:
         log.warning(f"Guest company lookup failed room={room_id}: {exc}")
 
-    # Build screenshot HTML if provided
     screenshot_html = ""
-    if screenshot_mxc:
+    if screenshot_url:
         try:
-            file_data, filename = await _download_matrix_media(screenshot_mxc)
+            file_data, filename = await _download_rc_file(screenshot_url)
             b64 = base64.b64encode(file_data).decode("ascii")
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
             mime = f"image/{ext}" if ext in ("png", "jpg", "jpeg", "gif", "webp") else "image/png"
@@ -691,9 +836,8 @@ async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screens
             subject, description, "Medium", account_id
         )
         log_ticket(room_id)
-
         clear_guest_session(room_id)
-        await _send(client, room_id,
+        await _send(room_id,
             f"I've opened ticket #{display_id} for you. "
             f"Someone from our team will reach out next business morning.\n\n"
             f"If this becomes urgent before then, call 587-400-9573 and select "
@@ -701,38 +845,26 @@ async def _finalize_guest_ticket(client: AsyncClient, room_id: str, log, screens
         log.info(
             f"Guest after-hours ticket #{display_id} created - "
             f"room={room_id} contact={contact_name} company={company_name} "
-            f"screenshot={'yes' if screenshot_mxc else 'no'}"
+            f"screenshot={'yes' if screenshot_url else 'no'}"
         )
     except Exception as exc:
         log.error(f"Guest ticket creation failed room={room_id}: {exc}")
         clear_guest_session(room_id)
-        await _send(client, room_id,
+        await _send(room_id,
             "Sorry, there was an error creating the ticket. "
             "Please call 587-400-9573 and select the after-hours emergency option, "
             "or email support@bracer.ca and we'll follow up next business day.")
     return True
 
 
-async def _handle_guest_image(client: AsyncClient, room, room_id: str, mxc_url: str, log):
-    """Handle an image message during the guest after-hours flow.
-    Returns True if handled, False to fall through."""
-    gsession = get_guest_session(room_id)
-    if not gsession:
-        return False
-    if gsession["state"] != "await_screenshot":
-        return False
+# ── Machine ticket flow ───────────────────────────────────────────────────────
 
-    await _send(client, room_id, "Got it! Creating your ticket now...")
-    return await _finalize_guest_ticket(client, room_id, log, screenshot_mxc=mxc_url)
-
-
-async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, session: dict, log, screenshot_mxc: str = None):
+async def _finalize_machine_ticket(room_id: str, channel_name: str, session: dict, screenshot_url: str = None):
     """Create a SuperOps ticket from the !ticket flow data."""
     priority = "Medium"
-
-    issue    = session["issue"]
-    hostname = _hostname_from_room(room)
-    company  = get_company(room_id)
+    issue = session["issue"]
+    hostname = channel_name  # In RC, room name IS the hostname for machine rooms
+    company = get_company(room_id)
     clear_ticket_session(room_id)
 
     if not company:
@@ -745,7 +877,7 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
 
     if not company:
         log.warning(f"Could not identify company for room={room_id} host={hostname}")
-        await _send(client, room_id,
+        await _send(room_id,
             "Sorry, I couldn't identify your company to open a ticket. "
             "Please call us at 587-400-9573 or email support@bracersystems.com.")
         return
@@ -758,21 +890,21 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
 
     if not account_id:
         log.warning(f"No SuperOps client found for company='{company}' room={room_id}")
-        await _send(client, room_id,
+        await _send(room_id,
             "Sorry, I couldn't match your company in our system. "
             "Please call us at 587-400-9573 or email support@bracersystems.com.")
         return
 
     initiated_note = ""
     if session.get("initiating_staff"):
-        staff_label = session["initiating_staff"].split(":")[0].lstrip("@").replace(".", " ").title()
+        staff_label = session["initiating_staff"].replace(".", " ").title()
         initiated_note = f"<br>Initiated by: Technician {html.escape(staff_label)} (on client's behalf)"
 
-    # Build screenshot HTML if provided
+    # Build screenshot HTML
     screenshot_html = ""
-    if screenshot_mxc:
+    if screenshot_url:
         try:
-            file_data, filename = await _download_matrix_media(screenshot_mxc)
+            file_data, filename = await _download_rc_file(screenshot_url)
             b64 = base64.b64encode(file_data).decode("ascii")
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
             mime = f"image/{ext}" if ext in ("png", "jpg", "jpeg", "gif", "webp") else "image/png"
@@ -785,14 +917,19 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
     # Send diagnostic commands and wait for responses
     _room_diag_text.pop(room_id, None)
     _room_machine_info.pop(room_id, None)
-    for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
-        await _send(client, room_id, cmd, delay=0)
+    diag_event = asyncio.Event()
+    _room_diag_events[room_id] = diag_event
 
-    # Poll for responses - yield to event loop each iteration so sync can process
-    for _ in range(10):  # up to 5 seconds (10 x 0.5s)
-        await asyncio.sleep(0.5)
-        if len(_room_diag_text.get(room_id, [])) >= 6:
-            break  # all 6 responses received
+    for cmd in ("!machineinfo", "!version", "!cpu", "!disk", "!ip", "!uptime"):
+        await _send(room_id, cmd, delay=0)
+
+    # Wait for diagnostic responses (max 5 seconds)
+    try:
+        await asyncio.wait_for(diag_event.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        log.info(f"Diagnostic timeout room={room_id} got={len(_room_diag_text.get(room_id, []))}/6")
+
+    _room_diag_events.pop(room_id, None)
 
     # Get cached machine info and full diagnostics
     minfo = _room_machine_info.get(room_id, {})
@@ -820,159 +957,108 @@ async def _finalize_machine_ticket(client: AsyncClient, room, room_id: str, sess
         subject = f"New ticket from {logged_user} @ {hostname}" if logged_user != "N/A" else issue
         internal_id, display_id = await create_superops_ticket(subject, description, priority, account_id)
         log_ticket(room_id)
-
-        await _send(client, room_id,
+        await _send(room_id,
             f"Done! Ticket #{display_id} created. A technician will follow up.\n"
             "View your ticket: https://bracer.superops.ai/portal")
         log.info(
             f"Ticket #{display_id} created - "
             f"room={room_id} host={hostname} company={company} "
-            f"screenshot={'yes' if screenshot_mxc else 'no'}"
+            f"screenshot={'yes' if screenshot_url else 'no'}"
         )
     except Exception as exc:
         log.error(f"Ticket creation failed room={room_id}: {exc}")
-        await _send(client, room_id,
+        await _send(room_id,
             "Sorry, there was an error creating the ticket. "
             "Please call us at 587-400-9573 or email support@bracersystems.com.")
 
 
-async def _handle_ticket_image(client: AsyncClient, room, room_id: str, mxc_url: str, log):
-    """Handle an image message during the !ticket flow.
-    Returns True if handled, False to fall through."""
+# ── Image handlers ────────────────────────────────────────────────────────────
+
+async def _handle_image(room_id: str, channel_name: str, user_name: str, file_url: str):
+    """Handle an image message (file attachment without text)."""
+    # Staff: allow screenshots only in staff-triggered sessions
+    if user_name in STAFF_USERNAMES:
+        session = get_ticket_session(room_id)
+        if session and session.get("staff_triggered") and session["state"] == "await_ticket_screenshot":
+            await _send(room_id, "Got it! Creating your ticket now...")
+            await _finalize_machine_ticket(room_id, channel_name, session, screenshot_url=file_url)
+        return
+
+    is_guest = _is_guest_sender(user_name)
+
+    # Guest screenshot
+    if is_guest:
+        gsession = get_guest_session(room_id)
+        if gsession and gsession["state"] == "await_screenshot":
+            await _send(room_id, "Got it! Creating your ticket now...")
+            await _finalize_guest_ticket(room_id, screenshot_url=file_url)
+            return
+
+    # Client screenshot
     session = get_ticket_session(room_id)
-    if not session:
-        return False
-    if session["state"] != "await_ticket_screenshot":
-        return False
-
-    await _send(client, room_id, "Got it! Creating your ticket now...")
-    await _finalize_machine_ticket(client, room, room_id, session, log, screenshot_mxc=mxc_url)
-    return True
+    if session and session["state"] == "await_ticket_screenshot":
+        await _send(room_id, "Got it! Creating your ticket now...")
+        await _finalize_machine_ticket(room_id, channel_name, session, screenshot_url=file_url)
 
 
-def _hostname_from_room(room) -> str:
-    """Parse hostname from canonical alias (#hostname:server) or fall back to room ID."""
-    alias = getattr(room, "canonical_alias", None) or room.display_name or room.room_id
-    if alias.startswith("#") and ":" in alias:
-        return alias[1: alias.index(":")]
-    return alias
+# ── Main message handler ─────────────────────────────────────────────────────
 
-
-def _truncate(text: str) -> str:
-    """Cap user input at INPUT_MAX_LEN characters."""
-    return text[:INPUT_MAX_LEN] if len(text) > INPUT_MAX_LEN else text
-
-
-async def _get_room_client_displayname(client: AsyncClient, room_id: str) -> str | None:
-    """Return the display name of the non-staff, non-bot user in the support room."""
-    try:
-        resp = await client.joined_members(room_id)
-        if not isinstance(resp, JoinedMembersResponse):
-            return None
-        for user_id, member_info in resp.members.items():
-            if user_id == BOT_USER_ID or user_id in STAFF_USERS:
-                continue
-            return member_info.display_name or user_id.split(":")[0].lstrip("@")
-    except Exception:
-        return None
-
-
-async def _handle_staff_ticket_trigger(
-    client: AsyncClient, room, room_id: str, sender: str, log
-):
-    """Handle !ticket command from a staff user - start the ticket flow addressing the client."""
-    if count_recent_tickets(room_id) >= TICKET_RATE_LIMIT:
-        await _send(client, room_id,
-            "Rate limit reached for this room. Please open a ticket manually in SuperOps.")
-        return
-    client_name = await _get_room_client_displayname(client, room_id)
-    name_part = f" {client_name}," if client_name else ""
-    set_ticket_session(room_id, "await_issue", staff_triggered=True, initiating_staff=sender)
-    await _send(client, room_id,
-        f"I'll help create a ticket.{name_part} Can you describe the issue?\n(!cancel to stop)")
-    log.info(f"Staff-triggered !ticket started room={room_id} staff={sender}")
-
-
-# ── Message handler ────────────────────────────────────────────────────────────
-
-startup_ts: int = 0  # milliseconds - set in main() before sync
-
-
-async def on_message(client: AsyncClient, room, event: RoomMessageText):
-    # Skip backlog (events received before bot started)
-    if event.server_timestamp < startup_ts:
-        return
-
-    sender  = event.sender
-    room_id = room.room_id
-    body    = _truncate(event.body.strip())
-    log     = logging.getLogger("bracer-bot")
-
-    # ── Autoresponder: check idle time BEFORE recording this message ──────────
-    is_from_customer = (sender != BOT_USER_ID and sender not in STAFF_USERS)
-    should_autorespond = is_from_customer and _should_autorespond(room_id)
-
-    # Record activity for ALL senders (staff, bot, customers) so idle tracking works
-    _record_room_activity(room_id)
-
-    # Ignore self
-    if sender == BOT_USER_ID:
-        return
+async def _handle_message(room_id: str, channel_name: str, user_name: str, body: str,
+                          should_autorespond: bool, file_url: str = ""):
+    """Handle a text message from the webhook."""
 
     # Staff: can trigger !ticket, !cancel, or advance a staff-triggered session
-    if sender in STAFF_USERS:
+    if user_name in STAFF_USERNAMES:
         if body.lower() == "!ticket":
-            await _handle_staff_ticket_trigger(client, room, room_id, sender, log)
+            await _handle_staff_ticket_trigger(room_id, channel_name, user_name)
             return
         if body.lower().strip() == "!cancel":
-            _cancel_session = get_ticket_session(room_id)
-            if _cancel_session:
+            session = get_ticket_session(room_id)
+            if session:
                 clear_ticket_session(room_id)
-                await _send(client, room_id, "Ticket cancelled.")
+                await _send(room_id, "Ticket cancelled.")
             return
-        _st_session = get_ticket_session(room_id)
-        if not (_st_session and _st_session.get("staff_triggered")):
+        session = get_ticket_session(room_id)
+        if not (session and session.get("staff_triggered")):
             return
-        # Fall through to session handling below for staff-triggered sessions
+        # Fall through to session handling for staff-triggered sessions
 
-    # Send autoresponder if room was idle long enough (non-staff only)
+    # Send autoresponder if room was idle
     if should_autorespond:
         msg = _get_autoresponder_message()
         if msg:
-            await _send(client, room_id, msg)
-            _record_room_activity(room_id)  # count the bot's reply as activity
-            log.info(f"Autoresponder sent room={room_id} sender={sender}")
+            await _send(room_id, msg)
+            _record_room_activity(room_id)
+            log.info(f"Autoresponder sent room={room_id} sender={user_name}")
 
-    is_guest = _is_guest_sender(sender)
+    is_guest = _is_guest_sender(user_name)
 
-    # ── Guest after-hours contact flow ─────────────────────────────────────────
+    # ── Guest after-hours contact flow ────────────────────────────────────
     if is_guest:
-        handled = await _handle_guest_afterhours(client, room, room_id, body, log)
+        handled = await _handle_guest_afterhours(room_id, body)
         if handled:
             return
 
-    # ── Cancel check (before session handling) ───────────────────────────────
+    # ── Cancel check ──────────────────────────────────────────────────────
     if body.lower().strip() == "!cancel":
-        _cancel = get_ticket_session(room_id)
-        if _cancel:
+        session = get_ticket_session(room_id)
+        if session:
             clear_ticket_session(room_id)
-            await _send(client, room_id, "Ticket cancelled.")
+            await _send(room_id, "Ticket cancelled.")
         return
 
-    # ── Active ticket session ──────────────────────────────────────────────────
+    # ── Active ticket session ─────────────────────────────────────────────
     session = get_ticket_session(room_id)
     if session:
         if session["state"] == "await_issue":
             set_ticket_session(room_id, "await_when", issue=body)
-            await _send(client, room_id,
-                "When did this start?")
+            await _send(room_id, "When did this start?")
             return
 
         if session["state"] == "await_when":
             set_ticket_session(room_id, "await_ticket_screenshot_yn",
                 issue=session["issue"], when_started=body)
-            await _send(client, room_id,
-                "Can you send a screenshot of the issue? (yes/no)")
+            await _send(room_id, "Can you send a screenshot of the issue? (yes/no)")
             return
 
         if session["state"] == "await_ticket_screenshot_yn":
@@ -980,43 +1066,48 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
             if answer in ("yes", "y", "yeah", "yep", "sure"):
                 set_ticket_session(room_id, "await_ticket_screenshot",
                     issue=session["issue"], when_started=session["when_started"])
-                await _send(client, room_id,
+                await _send(room_id,
                     "Please paste or attach your screenshot now using the screenshot button below.")
                 return
             elif answer in ("no", "n", "nope", "nah"):
                 return await _finalize_machine_ticket(
-                    client, room, room_id, session, log)
+                    room_id, channel_name, session)
             else:
-                await _send(client, room_id, "Please reply yes or no.")
+                await _send(room_id, "Please reply yes or no.")
                 return
 
         if session["state"] == "await_ticket_screenshot":
+            # Check if this message has a file attachment
+            if file_url:
+                await _send(room_id, "Got it! Creating your ticket now...")
+                return await _finalize_machine_ticket(
+                    room_id, channel_name, session, screenshot_url=file_url)
             if body.lower().strip() in ("skip", "no", "none"):
                 return await _finalize_machine_ticket(
-                    client, room, room_id, session, log)
-            await _send(client, room_id,
+                    room_id, channel_name, session)
+            await _send(room_id,
                 "I'm waiting for a screenshot image. Please paste or attach it, "
                 "or type 'skip' to create the ticket without one.")
             return
 
-    # ── !ticket command ────────────────────────────────────────────────────────
+    # ── !ticket command ───────────────────────────────────────────────────
     if body.lower() == "!ticket":
         if count_recent_tickets(room_id) >= TICKET_RATE_LIMIT:
-            await _send(client, room_id,
+            await _send(room_id,
                 "You've opened several tickets recently. "
                 "If this is urgent please call us at 587-400-9573.")
             return
         set_ticket_session(room_id, "await_issue")
-        await _send(client, room_id, "What's the issue you're experiencing?\n(!cancel to stop)")
+        await _send(room_id, "What's the issue you're experiencing?\n(!cancel to stop)")
         return
 
-    # ── Greeting (once per room) ───────────────────────────────────────────────
+    # ── Greeting (once per room) ──────────────────────────────────────────
     if not has_greeted(room_id):
         if is_guest:
             mark_greeted(room_id, None)
             if is_business_hours():
                 log.info(f"Guest greeted (business hours) room={room_id}")
-                await _send(client, room_id, GUEST_GREETING_BUSINESS)
+                await _send(room_id, GUEST_GREETING_BUSINESS)
             else:
                 log.info(f"Guest greeted (after hours) room={room_id} - starting contact flow")
                 set_guest_session(room_id, "await_name")
@@ -1031,10 +1122,10 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
                     )
                 else:
                     greeting = GUEST_GREETING_AFTERHOURS
-                await _send(client, room_id, greeting)
+                await _send(room_id, greeting)
         else:
-            hostname = _hostname_from_room(room)
-            company  = None
+            hostname = channel_name
+            company = None
             try:
                 company = await _get_company_name(hostname)
             except Exception as exc:
@@ -1042,128 +1133,18 @@ async def on_message(client: AsyncClient, room, event: RoomMessageText):
             mark_greeted(room_id, company)
             log.info(f"Greeted room={room_id} host={hostname} company={company}")
             greeting = GREETING_BUSINESS if is_business_hours() else GREETING_AFTERHOURS
-            await _send(client, room_id, greeting)
+            await _send(room_id, greeting)
 
 
-async def on_image(client: AsyncClient, room, event: RoomMessageImage):
-    """Handle image messages - used for screenshot capture during ticket flows."""
-    if event.server_timestamp < startup_ts:
+async def _handle_staff_ticket_trigger(room_id: str, channel_name: str, user_name: str):
+    """Handle !ticket command from a staff user."""
+    if count_recent_tickets(room_id) >= TICKET_RATE_LIMIT:
+        await _send(room_id,
+            "Rate limit reached for this room. Please open a ticket manually in SuperOps.")
         return
-
-    sender  = event.sender
-    room_id = room.room_id
-    log     = logging.getLogger("bracer-bot")
-
-    _record_room_activity(room_id)
-
-    if sender == BOT_USER_ID:
-        return
-
-    mxc_url = event.url
-    if not mxc_url:
-        return
-
-    # Staff: allow screenshots only in staff-triggered sessions
-    if sender in STAFF_USERS:
-        _st_session = get_ticket_session(room_id)
-        if _st_session and _st_session.get("staff_triggered"):
-            await _handle_ticket_image(client, room, room_id, mxc_url, log)
-        return
-
-    is_guest = _is_guest_sender(sender)
-
-    if is_guest:
-        handled = await _handle_guest_image(client, room, room_id, mxc_url, log)
-        if handled:
-            return
-
-    handled = await _handle_ticket_image(client, room, room_id, mxc_url, log)
-    if handled:
-        return
-
-
-async def on_notice(client: AsyncClient, room, event: RoomMessageNotice):
-    """Handle m.notice messages - captures diagnostic responses from Electron app."""
-    if event.server_timestamp < startup_ts:
-        return
-    sender  = event.sender
-    room_id = room.room_id
-    body    = event.body.strip()
-    log     = logging.getLogger("bracer-bot")
-
-    if sender == BOT_USER_ID or sender in STAFF_USERS:
-        return
-
-    if _is_diag_response(body):
-        parsed = _parse_machine_info(body)
-        if parsed:
-            _room_machine_info[room_id] = parsed
-            log.info(f"Cached machine info for room={room_id}: user={parsed.get('user')} serial=...{(parsed.get('serial') or '')[-6:]}")
-        if room_id not in _room_diag_text:
-            _room_diag_text[room_id] = []
-        _room_diag_text[room_id].append(body)
-
-
-# ── Entry point ────────────────────────────────────────────────────────────────
-
-async def main():
-    global startup_ts
-    startup_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
-    log = logging.getLogger("bracer-bot")
-
-    init_db()
-
-    config = AsyncClientConfig(
-        max_limit_exceeded=0,
-        max_timeouts=0,
-        store_sync_tokens=False,
-    )
-    client = AsyncClient(MATRIX_HOMESERVER, BOT_USER_ID, config=config)
-    client.device_id = "BRACER_BOT"
-
-    resp = await client.login(BOT_PASSWORD, device_name="BRACER_BOT")
-    if not isinstance(resp, LoginResponse):
-        log.error(f"Login failed: {resp}")
-        await client.close()
-        return
-
-    log.info(f"Logged in as {BOT_USER_ID}")
-
-    client.add_event_callback(
-        lambda room, event: asyncio.ensure_future(on_message(client, room, event)),
-        RoomMessageText,
-    )
-    client.add_event_callback(
-        lambda room, event: asyncio.ensure_future(on_image(client, room, event)),
-        RoomMessageImage,
-    )
-    client.add_event_callback(
-        lambda room, event: asyncio.ensure_future(on_notice(client, room, event)),
-        RoomMessageNotice,
-    )
-
-    async def on_sync(resp):
-        for room_id in list(client.invited_rooms.keys()):
-            if not await _is_bracer_room(room_id):
-                log.warning(f"Rejecting invite to {room_id} - not a bracer-register room")
-                await client.room_leave(room_id)
-                continue
-            log.info(f"Auto-joining invited room: {room_id}")
-            await client.join(room_id)
-
-    client.add_response_callback(on_sync, SyncResponse)
-
-    log.info("Sync loop starting...")
-    try:
-        await client.sync_forever(timeout=30_000, full_state=True)
-    finally:
-        await client.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    client_name = await _get_room_client_displayname(room_id)
+    name_part = f" {client_name}," if client_name else ""
+    set_ticket_session(room_id, "await_issue", staff_triggered=True, initiating_staff=user_name)
+    await _send(room_id,
+        f"I'll help create a ticket.{name_part} Can you describe the issue?\n(!cancel to stop)")
+    log.info(f"Staff-triggered !ticket started room={room_id} staff={user_name}")
