@@ -5,8 +5,6 @@
  * Thin Rocket.Chat client — REST API + DDP WebSocket for real-time.
  * No SDK dependencies; uses Node built-in https and WebSocket.
  *
- * Replaces matrix-client.js for the Bracer Chat v2 migration.
- *
  * Auth model:  X-Auth-Token + X-User-Id headers on every REST request.
  * Real-time:   DDP WebSocket subscriptions (stream-room-messages, typing).
  * Room types:  Works with channels (c), groups/private (p), and DMs (d)

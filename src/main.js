@@ -250,7 +250,7 @@ async function updateBadges(count) {
 
 function getRoomIds() {
   if (!session) return {};
-  // Support both old Matrix field names and new RC format
+  // Support both nested roomIds (RC) and flat room_id_* (legacy session.dat)
   return {
     machine  : session.roomIds?.machine   || session.room_id_machine,
     broadcast: session.roomIds?.broadcast  || session.room_id_broadcast,
@@ -269,7 +269,7 @@ app.on('ready', async () => {
   machineInfo  = getMachineInfo();
   currentUser  = machineInfo.windowsUser;
 
-  // Check for RC-format auth token (authToken) or legacy Matrix format (access_token)
+  // Check for auth token (authToken preferred, access_token as legacy fallback)
   const hasValidSession = session && (session.authToken || session.access_token);
 
   if (!hasValidSession) {
@@ -305,7 +305,7 @@ app.on('ready', async () => {
   // 3. Startup cleanup ───────────────────────────────────────────────────
   cleanupExpired();
 
-  // Extract auth credentials (support both new RC and legacy Matrix field names)
+  // Extract auth credentials (authToken/userId preferred, legacy fallback)
   const authToken = session.authToken || session.access_token;
   const userId    = session.userId    || session.user_id;
   const roomIds   = getRoomIds();
