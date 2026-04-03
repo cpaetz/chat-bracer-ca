@@ -276,7 +276,7 @@ app.on('ready', async () => {
     console.warn('[BracerChat] session.dat unreadable — attempting server reauth...');
     try {
       const reauthResp = await new Promise((resolve, reject) => {
-        const postData = JSON.stringify({ hostname: machineInfo.hostname, serial: machineInfo.serial });
+        const postData = JSON.stringify({ hostname: machineInfo.hostname, serial: machineInfo.serial, logged_in_user: currentUser || '' });
         const opts = new URL(`${SERVER_URL}/api/machine/reauth`);
         const req = require('https').request({
           hostname: opts.hostname, path: opts.pathname, method: 'POST',
@@ -318,11 +318,55 @@ app.on('ready', async () => {
     userId
   });
 
-  // Get user info (sets rcClient.username)
+  // Get user info (sets rcClient.username and rcClient.name)
   try {
     await rcClient.getMe();
   } catch (err) {
     console.error('[BracerChat] Failed to get user info:', err.message);
+  }
+
+  // Update display name on server: HOSTNAME (username)
+  if (currentUser && currentUser !== 'Unknown') {
+    const expectedName = `${machineInfo.hostname.toUpperCase()} (${currentUser})`;
+    if (rcClient.name !== expectedName) {
+      console.log(`[BracerChat] Display name mismatch: "${rcClient.name}" vs expected "${expectedName}" — updating`);
+      try {
+        const postData = JSON.stringify({ logged_in_user: currentUser });
+        const opts = new URL(`${SERVER_URL}/api/machine/displayname`);
+        await new Promise((resolve, reject) => {
+          const req = require('https').request({
+            hostname: opts.hostname, path: opts.pathname, method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+              'X-Auth-Token': authToken,
+              'X-User-Id': userId,
+            }
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              if (res.statusCode === 200) {
+                const parsed = JSON.parse(data);
+                rcClient.name = parsed.display_name || expectedName;
+                console.log('[BracerChat] Display name set to:', rcClient.name);
+              } else {
+                console.warn('[BracerChat] Display name update failed:', res.statusCode, data);
+              }
+              resolve();
+            });
+          });
+          req.on('error', e => { console.warn('[BracerChat] Display name update error:', e.message); resolve(); });
+          req.setTimeout(10_000, () => { req.destroy(); resolve(); });
+          req.write(postData);
+          req.end();
+        });
+      } catch (e) {
+        console.warn('[BracerChat] Display name update error:', e.message);
+      }
+    } else {
+      console.log('[BracerChat] Display name already correct:', rcClient.name);
+    }
   }
 
   // Derive company name from company broadcast room
@@ -582,6 +626,13 @@ app.on('ready', async () => {
     }
   });
 
+  // Forward message deletions to renderer
+  rcClient.onDelete(({ roomId, messageId }) => {
+    if (!isAuthorisedRoom(roomId)) return;
+    console.log('[BracerChat] message deleted — roomId:', roomId, 'msgId:', messageId);
+    sendToRenderer('message-deleted', { roomId, messageId });
+  });
+
   // Forward typing indicators to renderer
   // RC DDP sends individual typing events: { roomId, username, isTyping }
   // We accumulate active typers per room and forward the current list.
@@ -665,10 +716,37 @@ async function checkUserChange() {
     const user = await getWindowsUserAsync();
     if (user && user !== currentUser && user !== 'Unknown') {
       currentUser = user;
-      // RC doesn't support display name changes via API in the same way as Matrix.
-      // The hostname (username) is set at registration. We just track the user change
-      // for session info and machine info commands.
       console.log('[BracerChat] Windows user changed to:', currentUser);
+
+      // Update display name on RC server
+      if (session && session.authToken && session.userId) {
+        try {
+          const postData = JSON.stringify({ logged_in_user: currentUser });
+          const opts = new URL(`${SERVER_URL}/api/machine/displayname`);
+          const req = require('https').request({
+            hostname: opts.hostname, path: opts.pathname, method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+              'X-Auth-Token': session.authToken,
+              'X-User-Id': session.userId,
+            }
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              if (res.statusCode === 200) console.log('[BracerChat] Display name updated:', data);
+              else console.warn('[BracerChat] Display name update failed:', res.statusCode, data);
+            });
+          });
+          req.on('error', e => console.warn('[BracerChat] Display name update error:', e.message));
+          req.setTimeout(10_000, () => req.destroy());
+          req.write(postData);
+          req.end();
+        } catch (e) {
+          console.warn('[BracerChat] Display name update error:', e.message);
+        }
+      }
     }
   } catch (err) {
     console.error('[BracerChat] User-change check failed:', err.message);
@@ -705,6 +783,7 @@ ipcMain.handle('get-session-info', () => {
   return {
     userId          : session.userId || session.user_id,
     username        : rcClient?.username || '',
+    displayName     : rcClient?.name || '',
     machineRoomId   : rooms.machine,
     broadcastRoomId : rooms.broadcast,
     companyRoomId   : rooms.company,

@@ -117,6 +117,12 @@ contextBridge.exposeInMainWorld('bracerChat', {
     ipcRenderer.on('session-update', (_event, data) => callback(data));
   },
 
+  // ── Message deletion ──────────────────────────────────────────────────
+  /** Register a callback for message deletions from DDP. Called with { roomId, messageId }. */
+  onMessageDeleted: (callback) => {
+    ipcRenderer.on('message-deleted', (_event, data) => callback(data));
+  },
+
   // ── Typing indicators ─────────────────────────────────────────────────
   sendTyping: (roomId, typing) => ipcRenderer.invoke('send-typing', roomId, typing),
 

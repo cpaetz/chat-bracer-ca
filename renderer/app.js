@@ -298,6 +298,15 @@ async function init() {
 
     window.bracerChat.onNewMessage(handleIncomingMessage);
 
+    window.bracerChat.onMessageDeleted(({ roomId, messageId }) => {
+      console.log('[app] message-deleted:', roomId, messageId);
+      const el = document.querySelector(`[data-msg-id="${messageId}"]`);
+      if (el) {
+        el.remove();
+        console.log('[app] removed message element:', messageId);
+      }
+    });
+
     window.bracerChat.onSessionUpdate((update) => {
       console.log('[app] session-update received:', JSON.stringify(update));
       if (update.broadcastRoomId) sessionInfo.broadcastRoomId = update.broadcastRoomId;
@@ -367,7 +376,11 @@ function senderLabel(message) {
     // Backward compat: if called with a plain string (username)
     return message || 'Unknown';
   }
-  return message.u?.username || message.u?.name || 'Unknown';
+  // For own messages, always use the current display name (overrides stale name in old messages)
+  if (sessionInfo && message.u?._id === sessionInfo.userId && sessionInfo.displayName) {
+    return sessionInfo.displayName;
+  }
+  return message.u?.name || message.u?.username || 'Unknown';
 }
 
 /** Scroll to a message by _id and briefly flash it. */
@@ -840,7 +853,7 @@ async function sendMessage() {
         msg : text,
         tmid: replyTarget._id,
         ts  : new Date().toISOString(),
-        u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' }
+        u   : { _id: sessionInfo.userId, username: sessionInfo.username || '', name: sessionInfo.displayName || '' }
       });
     } else {
       await window.bracerChat.sendMessage(activeRoomId, text);
@@ -848,7 +861,7 @@ async function sendMessage() {
         _id : `local-${Date.now()}`,
         msg : text,
         ts  : new Date().toISOString(),
-        u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' }
+        u   : { _id: sessionInfo.userId, username: sessionInfo.username || '', name: sessionInfo.displayName || '' }
       });
     }
     scrollToBottom(true);
@@ -896,7 +909,7 @@ async function sendFileByPath({ name, mimeType, data }) {
       _id : `local-${Date.now()}`,
       msg : fileName,
       ts  : new Date().toISOString(),
-      u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' }
+      u   : { _id: sessionInfo.userId, username: sessionInfo.username || '', name: sessionInfo.displayName || '' }
     };
     if (fileUrl) {
       msg.attachments = [{
@@ -999,7 +1012,7 @@ async function captureAndSend(sourceId) {
       _id : `local-${Date.now()}`,
       msg : fileName,
       ts  : new Date().toISOString(),
-      u   : { _id: sessionInfo.userId, username: sessionInfo.username || '' },
+      u   : { _id: sessionInfo.userId, username: sessionInfo.username || '', name: sessionInfo.displayName || '' },
       attachments: fileUrl ? [{ title: fileName, title_link: fileUrl, image_url: fileUrl }] : []
     });
     scrollToBottom(true);

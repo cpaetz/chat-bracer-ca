@@ -313,6 +313,7 @@ class RegisterRequest(BaseModel):
     hostname: str
     company: str
     elevated: bool = False  # If True, machine account gets power level 50 in company broadcast
+    logged_in_user: str = ""  # Windows username for display name, e.g. "chris.paetz"
 
     @validator("hostname")
     def validate_hostname(cls, v):
@@ -326,6 +327,22 @@ class RegisterRequest(BaseModel):
         if not (1 <= len(v) <= 128):
             raise ValueError("Company name must be 1-128 characters")
         return v
+
+    @validator("logged_in_user")
+    def validate_logged_in_user(cls, v):
+        v = v.strip()
+        if v and len(v) > 128:
+            raise ValueError("logged_in_user must be <= 128 characters")
+        return v
+
+
+def _build_display_name(hostname: str, logged_in_user: str = "") -> str:
+    """Build RC display name: 'HOSTNAME (user)' or just 'HOSTNAME'."""
+    if logged_in_user:
+        # Strip DOMAIN\ prefix if present (e.g. "BRACER\chris.paetz" -> "chris.paetz")
+        user = logged_in_user.split("\\")[-1] if "\\" in logged_in_user else logged_in_user
+        return f"{hostname.upper()} ({user})"
+    return hostname.upper()
 
 
 ALLOWED_ORIGINS = {"https://bracer.ca", "https://www.bracer.ca"}
@@ -445,17 +462,18 @@ async def register(
     company = body.company
     company_slug = slugify(company)
     elevated = body.elevated
+    display_name = _build_display_name(hostname, body.logged_in_user)
 
-    logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} ip={request.client.host}")
+    logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} display={display_name} ip={request.client.host}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # 1. Create or update RC user
         password = generate_password()
         existing = await _rc_get_user(client, hostname)
         if existing:
-            rc_user = await _rc_update_user(client, existing["_id"], password=password, active=True)
+            rc_user = await _rc_update_user(client, existing["_id"], password=password, active=True, name=display_name)
         else:
-            rc_user = await _rc_create_user(client, hostname, password, name=hostname)
+            rc_user = await _rc_create_user(client, hostname, password, name=display_name)
 
         rc_user_id = rc_user["_id"]
 
@@ -676,11 +694,13 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
     Accepts POST with JSON body {"token": "...", "hostname": "..."} (preferred)
     or GET with query params (deprecated — token leaks into Caddy logs)."""
     # POST with JSON body (preferred)
+    logged_in_user = ""
     if request.method == "POST" and not token:
         try:
             body = await request.json()
             token = str(body.get("token", ""))
             hostname = str(body.get("hostname", ""))
+            logged_in_user = str(body.get("logged_in_user", ""))
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
     elif request.method == "GET":
@@ -706,15 +726,17 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
 
     company_slug = slugify(company)
 
+    display_name = _build_display_name(hostname, logged_in_user)
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Create or update user
         password = generate_password()
         existing = await _rc_get_user(client, hostname)
         if existing:
-            await _rc_update_user(client, existing["_id"], password=password, active=True)
+            await _rc_update_user(client, existing["_id"], password=password, active=True, name=display_name)
             rc_user_id = existing["_id"]
         else:
-            rc_user = await _rc_create_user(client, hostname, password, name=hostname)
+            rc_user = await _rc_create_user(client, hostname, password, name=display_name)
             rc_user_id = rc_user["_id"]
 
         # Login
@@ -968,6 +990,28 @@ def _filter_log_lines(content: bytes) -> bytes:
     return "".join(result).encode("utf-8")
 
 
+@app.post("/api/machine/displayname")
+async def update_display_name(request: Request):
+    """Update the machine user's RC display name. Called by Electron client on user change.
+    Requires valid RC auth. Body: {"logged_in_user": "chris.paetz"}"""
+    hostname = await _validate_machine_token(request, request.client.host)
+    if not hostname:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    try:
+        body = await request.json()
+        logged_in_user = str(body.get("logged_in_user", "")).strip()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    display_name = _build_display_name(hostname, logged_in_user)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        existing = await _rc_get_user(client, hostname)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Machine not registered")
+        await _rc_update_user(client, existing["_id"], name=display_name)
+    logger.info(f"Display name updated: {hostname} -> {display_name}")
+    return {"ok": True, "display_name": display_name}
+
+
 @app.get("/api/update/check")
 async def update_check(request: Request):
     """Return the current app version and update type. Requires valid RC auth."""
@@ -992,6 +1036,7 @@ async def update_check(request: Request):
 class ReauthRequest(BaseModel):
     hostname: str
     serial: str
+    logged_in_user: str = ""  # Windows username for display name update
 
     @validator("hostname")
     def validate_hostname(cls, v):
@@ -1009,6 +1054,13 @@ class ReauthRequest(BaseModel):
             raise ValueError("Invalid serial characters")
         return v
 
+    @validator("logged_in_user")
+    def validate_logged_in_user(cls, v):
+        v = v.strip()
+        if v and len(v) > 128:
+            raise ValueError("logged_in_user must be <= 128 characters")
+        return v
+
 
 @app.post("/api/machine/reauth")
 async def machine_reauth(body: ReauthRequest, request: Request):
@@ -1017,8 +1069,9 @@ async def machine_reauth(body: ReauthRequest, request: Request):
     Rate limited: uses public rate limit (5/min + cooldown)."""
     hostname = body.hostname
     serial = body.serial
+    display_name = _build_display_name(hostname, body.logged_in_user)
 
-    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} ip={request.client.host}")
+    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} display={display_name} ip={request.client.host}")
 
     # Verify this is a machine account (no dots, not staff/bot)
     if "." in hostname or hostname in ("bracerbot", "bracer-register"):
@@ -1033,9 +1086,9 @@ async def machine_reauth(body: ReauthRequest, request: Request):
 
         rc_user_id = existing["_id"]
 
-        # Reset password and log in
+        # Reset password, update display name, and log in
         new_password = generate_password()
-        await _rc_update_user(client, rc_user_id, password=new_password)
+        await _rc_update_user(client, rc_user_id, password=new_password, name=display_name)
         login_data = await _rc_login(client, hostname, new_password)
         auth_token = login_data["authToken"]
 

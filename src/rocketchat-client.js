@@ -29,6 +29,7 @@ class RocketChatClient {
     this.authToken = authToken;
     this.userId    = userId;
     this.username  = null; // set after first /me call or from session
+    this.name      = null; // RC display name (e.g. "BSI-SPK-P14S (chris.paetz)")
 
     // DDP state
     this._ws              = null;
@@ -43,6 +44,7 @@ class RocketChatClient {
 
     // Event handlers
     this._messageHandlers = [];
+    this._deleteHandlers  = [];
     this._typingHandlers  = [];
   }
 
@@ -211,6 +213,7 @@ class RocketChatClient {
   async getMe() {
     const data = await this._request('GET', '/api/v1/me');
     if (data.username) this.username = data.username;
+    if (data.name)     this.name     = data.name;
     return data;
   }
 
@@ -477,6 +480,11 @@ class RocketChatClient {
     this._messageHandlers.push(handler);
   }
 
+  /** Register a callback for deleted messages. Called with { roomId, messageId }. */
+  onDelete(handler) {
+    this._deleteHandlers.push(handler);
+  }
+
   /** Register a callback for typing updates. Called with { roomId, usernames }. */
   onTyping(handler) {
     this._typingHandlers.push(handler);
@@ -669,6 +677,15 @@ class RocketChatClient {
         params : [`${roomId}/typing`, false]
       });
 
+      // Subscribe to message deletion notifications
+      const delSubId = this._nextDdpId();
+      this._ddpSend({
+        msg    : 'sub',
+        id     : delSubId,
+        name   : 'stream-notify-room',
+        params : [`${roomId}/deleteMessage`, false]
+      });
+
       this._subscribedRooms.add(roomId);
     }
   }
@@ -711,6 +728,14 @@ class RocketChatClient {
       const message = args[0];
       if (!message || !message.rid) return;
 
+      // Message deleted — check for t:'rm' or _hidden flag
+      if (message.t === 'rm' || message._hidden === true) {
+        for (const handler of this._deleteHandlers) {
+          handler({ roomId: message.rid, messageId: message._id });
+        }
+        return;
+      }
+
       // Skip own messages (rendered optimistically on send)
       if (message.u && message.u._id === this.userId) return;
 
@@ -720,6 +745,25 @@ class RocketChatClient {
       for (const handler of this._messageHandlers) {
         handler({ roomId: message.rid, message });
       }
+    }
+
+    // Handle delete notifications via stream-notify-room deleteMessage/deleteMessageBulk
+    if (collection === 'stream-notify-room' && (eventName.endsWith('/deleteMessage') || eventName.endsWith('/deleteMessageBulk'))) {
+      const roomId = eventName.split('/')[0];
+      // deleteMessage or deleteMessageBulk event
+      if (eventName.endsWith('/deleteMessage') && args[0]) {
+        const msgId = args[0]._id || args[0];
+        for (const handler of this._deleteHandlers) {
+          handler({ roomId, messageId: msgId });
+        }
+      } else if (eventName.endsWith('/deleteMessageBulk') && Array.isArray(args[0])) {
+        for (const msgId of args[0]) {
+          for (const handler of this._deleteHandlers) {
+            handler({ roomId, messageId: msgId });
+          }
+        }
+      }
+      return;
     }
 
     if (collection === 'stream-notify-room' && eventName.endsWith('/typing')) {

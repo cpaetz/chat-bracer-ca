@@ -22,11 +22,11 @@
                                    The token and the op CLI are removed from the machine when the script exits.
 
 .NOTES
-    Version:        2.5
+    Version:        3.0
     Author:         Bracer Systems Inc.
     Creation Date:  2026-03-21
-    Updated:        2026-03-23
-    Purpose:        Bracer Chat - Phase 6 Deployment Script (no backtick continuations for SuperOps compatibility)
+    Updated:        2026-04-02
+    Purpose:        Bracer Chat v2 - Rocket.Chat deployment (no backtick continuations for SuperOps compatibility)
 #>
 
 #Requires -Version 5.1
@@ -339,18 +339,20 @@ function Invoke-BracerChatDeploy {
     # ------------------------------------------------------------------
     $SkipRegistration = $false
     if (Test-Path -Path $SessionDatPath) {
-        Log-Message "session.dat found - checking for valid access_token."
+        Log-Message "session.dat found - checking for valid authToken."
         try {
             $EncBytes  = [System.IO.File]::ReadAllBytes($SessionDatPath)
             $DecBytes  = [System.Security.Cryptography.ProtectedData]::Unprotect(
                 $EncBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine
             )
             $Existing  = [System.Text.Encoding]::UTF8.GetString($DecBytes) | ConvertFrom-Json
-            if (-not [string]::IsNullOrEmpty($Existing.access_token)) {
+            # Support both RC (authToken) and legacy Matrix (access_token) field names
+            $HasToken = (-not [string]::IsNullOrEmpty($Existing.authToken)) -or (-not [string]::IsNullOrEmpty($Existing.access_token))
+            if ($HasToken) {
                 Log-Message "Valid session.dat found. Skipping registration."
                 $SkipRegistration = $true
             } else {
-                Log-Message "session.dat found but access_token is empty. Re-registering." -Level 'WARNING'
+                Log-Message "session.dat found but authToken is empty. Re-registering." -Level 'WARNING'
             }
         } catch {
             Log-Message "session.dat could not be decrypted or parsed: $($_.Exception.Message). Re-registering." -Level 'WARNING'
@@ -408,9 +410,10 @@ function Invoke-BracerChatDeploy {
     Log-Message "Calling Registration API at ${RegistrationUrl}."
     try {
         $Body = @{
-            hostname = $Hostname
-            company  = $CompanyName
-            elevated = $false
+            hostname       = $Hostname
+            company        = $CompanyName
+            elevated       = $false
+            logged_in_user = $WinUser
         } | ConvertTo-Json
 
         $RegParams = @{
@@ -434,9 +437,8 @@ function Invoke-BracerChatDeploy {
     # Build session.dat JSON - flatten rooms.* to room_id_*
     # ------------------------------------------------------------------
     $SessionData = [ordered]@{
-        user_id           = $ApiResult.user_id
-        access_token      = $ApiResult.access_token
-        device_id         = $ApiResult.device_id
+        userId            = $ApiResult.user_id
+        authToken         = $ApiResult.auth_token
         elevated          = $ApiResult.elevated
         room_id_machine   = $ApiResult.rooms.machine
         room_id_broadcast = $ApiResult.rooms.broadcast
