@@ -1,3 +1,8 @@
 node_modules/
 dist/
 bracer-chat-deploy
+__pycache__/
+*.pyc
+.claude/
+*.b64
+chunks.txt
