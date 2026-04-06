@@ -119,7 +119,7 @@ async def webhook(request: Request):
 
     # Validate webhook token
     token = payload.get("token", "")
-    if RC_WEBHOOK_TOKEN and token != RC_WEBHOOK_TOKEN:
+    if not RC_WEBHOOK_TOKEN or token != RC_WEBHOOK_TOKEN:
         return JSONResponse(status_code=401, content={"error": "invalid token"})
 
     # Extract fields from RC webhook payload

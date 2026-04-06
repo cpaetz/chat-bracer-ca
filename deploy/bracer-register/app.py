@@ -99,6 +99,17 @@ def generate_password(length: int = 40) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def _get_client_ip(request: Request) -> str:
+    """Extract real client IP from X-Forwarded-For (set by Caddy reverse proxy).
+    Falls back to direct connection IP if header is missing."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        # Take the first (leftmost) IP — this is the original client IP
+        # Safe because only Caddy connects to uvicorn (bound to 127.0.0.1)
+        return xff.split(",")[0].strip()
+    return _get_client_ip(request)
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
     if not secrets.compare_digest(credentials.credentials.encode(), API_SECRET.encode()):
         logger.warning("Invalid API token")
@@ -394,7 +405,7 @@ async def guest_origin_check(request: Request, call_next):
             return await call_next(request)
         origin = request.headers.get("origin", "").lower()
         if origin not in ALLOWED_ORIGINS:
-            logger.warning(f"Guest endpoint blocked: origin={origin!r} path={request.url.path} ip={request.client.host}")
+            logger.warning(f"Guest endpoint blocked: origin={origin!r} path={request.url.path} ip={_get_client_ip(request)}")
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
     return await call_next(request)
 
@@ -403,7 +414,7 @@ async def guest_origin_check(request: Request, call_next):
 async def rate_limit(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/"):
-        ip = request.client.host
+        ip = _get_client_ip(request)
         now = time.monotonic()
         async with _rate_lock:
             # Periodic cleanup of stale entries to prevent unbounded dict growth
@@ -502,7 +513,7 @@ async def register(
     display_name = _build_display_name(hostname, body.logged_in_user)
     new_username = _build_username(hostname, body.logged_in_user)
 
-    logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} display={display_name} username={new_username} ip={request.client.host}")
+    logger.info(f"Registration: hostname={hostname} company={company} elevated={elevated} display={display_name} username={new_username} ip={_get_client_ip(request)}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # 1. Create or update RC user
@@ -742,7 +753,7 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
     elif request.method == "GET":
-        logger.warning(f"DEPRECATED: /api/installer/claim called via GET (token in URL). ip={request.client.host}")
+        logger.warning(f"DEPRECATED: /api/installer/claim called via GET (token in URL). ip={_get_client_ip(request)}")
 
     if not token or not hostname:
         raise HTTPException(status_code=400, detail="Missing token or hostname")
@@ -759,7 +770,7 @@ async def installer_claim(request: Request, token: str = "", hostname: str = "")
 
     logger.info(
         f"Installer claim: token=...{token[-8:]} hostname={hostname} "
-        f"company={company} ip={request.client.host}"
+        f"company={company} ip={_get_client_ip(request)}"
     )
 
     company_slug = slugify(company)
@@ -1042,7 +1053,7 @@ async def update_display_name(request: Request):
     """Update the machine user's RC display name and username.
     Called by Electron client on startup and user change.
     Requires valid RC auth. Body: {"logged_in_user": "chris.paetz"}"""
-    hostname = await _validate_machine_token(request, request.client.host)
+    hostname = await _validate_machine_token(request, _get_client_ip(request))
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     try:
@@ -1064,7 +1075,7 @@ async def update_display_name(request: Request):
 @app.get("/api/update/check")
 async def update_check(request: Request):
     """Return the current app version and update type. Requires valid RC auth."""
-    hostname = await _validate_machine_token(request, request.client.host)
+    hostname = await _validate_machine_token(request, _get_client_ip(request))
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     logger.info(f"Update check (authenticated): hostname={hostname}")
@@ -1121,7 +1132,7 @@ async def machine_reauth(body: ReauthRequest, request: Request):
     display_name = _build_display_name(hostname, body.logged_in_user)
     new_username = _build_username(hostname, body.logged_in_user)
 
-    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} display={display_name} username={new_username} ip={request.client.host}")
+    logger.info(f"Reauth request: hostname={hostname} serial=...{serial[-6:]} display={display_name} username={new_username} ip={_get_client_ip(request)}")
 
     # Verify this is a machine account (not staff/bot)
     if hostname.lower() in ("bracerbot", "bracer-register"):
@@ -1196,7 +1207,7 @@ async def machine_reauth(body: ReauthRequest, request: Request):
     if not machine_room:
         logger.warning(f"Reauth: could not find machine room for {hostname}")
 
-    logger.info(f"Reauth complete: {hostname} -> {new_username} ip={request.client.host}")
+    logger.info(f"Reauth complete: {hostname} -> {new_username} ip={_get_client_ip(request)}")
     return {
         "user_id": rc_user_id,
         "username": new_username,
@@ -1212,7 +1223,7 @@ async def machine_reauth(body: ReauthRequest, request: Request):
 async def update_asar(request: Request):
     """Stream the latest app.asar (legacy endpoint — updates now pushed via SuperOps).
     Requires valid RC auth."""
-    hostname = await _validate_machine_token(request, request.client.host)
+    hostname = await _validate_machine_token(request, _get_client_ip(request))
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -1237,7 +1248,7 @@ async def update_asar(request: Request):
 async def update_download(request: Request):
     """Stream the latest installer EXE (legacy endpoint — updates now pushed via SuperOps).
     Requires valid RC auth."""
-    hostname = await _validate_machine_token(request, request.client.host)
+    hostname = await _validate_machine_token(request, _get_client_ip(request))
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -1303,7 +1314,7 @@ async def guest_start(request: Request, body: GuestStartRequest):
     guest_username = f"guest-{guest_id_suffix}"
     display_name = body.name
 
-    logger.info(f"Guest chat start: name={display_name} ip={request.client.host}")
+    logger.info(f"Guest chat start: name={display_name} ip={_get_client_ip(request)}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # 1. Create guest RC user
@@ -1387,7 +1398,7 @@ async def guest_heartbeat(request: Request):
 @app.post("/api/logs/upload")
 async def logs_upload(request: Request):
     """Receive a machine error log. Requires valid RC auth."""
-    hostname = await _validate_machine_token(request, request.client.host)
+    hostname = await _validate_machine_token(request, _get_client_ip(request))
     if not hostname:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -1485,10 +1496,22 @@ async def _validate_admin_session(request: Request, check_csrf: bool = False) ->
     return session["user_id"]
 
 
+_OAUTH_STATE_STORE: dict = {}  # state -> expires_at
+_OAUTH_STATE_TTL = 600  # 10 minutes
+
+
 @app.get("/api/admin/login")
 async def admin_login():
     """Redirect to Google OAuth consent screen for admin dashboard login."""
     state = secrets.token_hex(16)
+
+    # Store state for CSRF verification on callback; clean up expired states
+    now = time.time()
+    expired = [s for s, exp in _OAUTH_STATE_STORE.items() if now > exp]
+    for s in expired:
+        del _OAUTH_STATE_STORE[s]
+    _OAUTH_STATE_STORE[state] = now + _OAUTH_STATE_TTL
+
     params = urlencode({
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": GOOGLE_REDIRECT_URI,
@@ -1511,6 +1534,14 @@ async def admin_callback(request: Request, code: str = "", error: str = ""):
 
     if not code:
         raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    # Verify OAuth state to prevent CSRF
+    state = request.query_params.get("state", "")
+    if not state or state not in _OAUTH_STATE_STORE or time.time() > _OAUTH_STATE_STORE.get(state, 0):
+        _OAUTH_STATE_STORE.pop(state, None)
+        logger.warning("OAuth state validation failed — possible CSRF attempt")
+        return RedirectResponse(url="/admin/?error=invalid_state")
+    _OAUTH_STATE_STORE.pop(state, None)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         # Step 1: Exchange auth code for Google access token
