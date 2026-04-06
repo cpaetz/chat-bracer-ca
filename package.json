@@ -17,8 +17,5 @@
   },
   "dependencies": {
     "koffi": "^2.15.2"
-  },
-  "overrides": {
-    "lodash": "^4.17.21"
   }
 }
