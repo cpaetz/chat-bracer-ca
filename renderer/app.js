@@ -438,12 +438,15 @@ async function enrichQuoteBlock(quoteEl, messageId) {
       window.bracerChat.resolveMediaUrl(fileUrl).then(url => { if (url) img.src = url; });
     }
   } else {
-    const bodyText = msg.msg || getFileName(msg) || '[attachment]';
+    const bodyText = stripQuoteLink(msg.msg || '') || getFileName(msg) || '[attachment]';
     const textEl   = document.createElement('span');
     textEl.className   = 'reply-quote-text';
     textEl.textContent = bodyText.length > 120 ? bodyText.slice(0, 120) + '...' : bodyText;
     quoteEl.appendChild(textEl);
   }
+
+  // Quote block just expanded — scroll down if we were at the bottom
+  scrollToBottom(isNearBottom());
 }
 
 /**
