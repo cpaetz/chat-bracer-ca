@@ -6,3 +6,4 @@ __pycache__/
 .claude/
 *.b64
 chunks.txt
+.direnv/
